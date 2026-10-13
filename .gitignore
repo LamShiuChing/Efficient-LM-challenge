@@ -1,0 +1,7 @@
+.remember/
+__pycache__/
+.venv/
+runs/
+checkpoints/
+*.pt
+*.safetensors
