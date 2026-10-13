@@ -20,7 +20,33 @@ What has been tried, what it showed, and the gaps this project targets. Every en
 
 These papers are the nearest neighbours. The project must cite them and position against them.
 
-- **Cohen et al., *Knowledgeless Language Models (KLLMs)* (2026-07-14)** — [arXiv:2607.12831](https://arxiv.org/abs/2607.12831). Pretraining on text with **named entities anonymized** reduces closed-book recall. Across several model scales, it improves contextual QA, fact verification and hallucination detection. Under imperfect retrieval, robustness gains reach 20–25% relative. Calibration and abstention also improve. **This is essentially our §1A intervention.** The abstract does not report reasoning benchmarks or a size-for-size parameter ratio.
+- **Cohen et al., *Knowledgeless Language Models (KLLMs)* (2026-07-14)** — [arXiv:2607.12831](https://arxiv.org/abs/2607.12831). **This is essentially our §1A intervention.** The details below come from the full text, read via a summarizer that covered about 87% of the paper. Re-check any number before quoting it in a paper.
+  - **Method.**
+    - Flair OntoNotes NER tags people, NORP, facilities, organizations, GPEs, locations, products, events, works of art, laws and languages.
+    - Each entity is replaced with a *typed placeholder* (e.g. `PERSON184`) that is consistent within a document. There is no coreference resolution.
+    - Numbers, dates and quantities are kept. Estimated NER recall is about 87%.
+    - The tokenizer is a 30k BPE trained on the anonymized text.
+  - **Setup.**
+    - SmolLM 135M/360M/1.7B and Llama-3.2 1B/3B shapes, trained from scratch on 2.5B tokens (Wikipedia + CNN/DM) or on 10B/20B tokens (smollm-corpus).
+    - Each model has a matched twin trained on the original text. Only the anonymization differs.
+    - Fine-tuned per benchmark.
+  - **Results** (SmolLM-1.7B):
+    - Closed-book LAMA falls from 34.7 to 3.9.
+    - FEVER F1 rises from 86.9 to 94.7. HaluBench rises from 64.3 to 74.7.
+    - With BM25 at 10B tokens: NQ rises from 35.7 to 44.9 and TriviaQA from 52.8 to 63.4. That is about 20–26% relative; FEVER gains only about 6%.
+    - ECE falls from 0.115 to 0.083.
+    - Unsupported answers in tool-augmented QA fall from 21.5% to 13.2%.
+    - Under truncated or perturbed context, the anonymized model degrades less and abstains more.
+    - Gains are present at 135M.
+    - Random masking, span corruption and entity shuffling baselines give only marginal gains.
+  - **Not covered:**
+    - no math, no multi-hop eval; StrategyQA is the closest, 61.8 → 66.7
+    - no matched-score comparison across sizes
+    - no frequency-based (long-tail only) anonymization; ablations use a random fraction p ∈ {0.5, 0.75, 1.0}
+    - no realistic surrogate names
+    - no distillation or RL
+    - at most 20B tokens
+  - **Status.** Some numbers in the text don't match the tables (abstention F1, the 1.7B commonsense gains). Code and models are "to be released upon publication", and no links had appeared by 2026-10-13.
 - **Zhao et al., *Limited Memory Language Models (LMLM)* (2025; ICLR 2026)** — [arXiv:2505.15962](https://arxiv.org/abs/2505.15962). Facts are stored in an external database during pretraining, and retrieved fact values are **masked from the loss**, so the model learns to look facts up instead of memorizing them. The models are 124M–382M and are reported competitive with much larger LLMs on factual precision.
 - **Pouransari et al., *Pretraining with Hierarchical Memories: Separating Long-tail and Common Knowledge* (2025)** — [arXiv:2510.02375](https://arxiv.org/abs/2510.02375). A 160M "anchor" model plus an 18M memory fetched from a 4.6B memory bank matches a regular model with more than 2× the parameters.
 - **Samuel et al., *More Room for Language: Investigating the Effect of Retrieval on Language Models* (2024)** — [arXiv:2404.10939](https://arxiv.org/abs/2404.10939). Retrieval-pretrained models store less world knowledge. They model local context better and global context worse. This is evidence that removing knowledge pressure reallocates capacity.
@@ -86,8 +112,10 @@ These papers are the nearest neighbours. The project must cite them and position
 
 ## Open gaps this project targets
 
-1. **Parameter ratio for reasoning.** KLLMs and LMLM show knowledge-light pretraining helps evidence-grounded *factual* tasks. No source found reports a **score-vs-size curve on multi-step reasoning** comparing knowledge-light and normal recipes under matched compute.
-2. **Context utilization at small scale.** Pandey 2026 shows models of 7B and below largely ignore oracle context. Does a knowledge-light base, which *cannot* fall back on memory, learn to use context better? KLLMs' results hint yes. This is untested on reasoning.
-3. **Knowledge vs reasoning interaction.** LIMO and SynthWorlds suggest stored knowledge helps reasoning. Neither tests a model *pretrained* without it, with facts supplied at test time.
-4. **Calibration from data, not from tuning.** KLLMs reports better abstention as a side effect of anonymization. Phase 3 can test whether this makes "I need to look this up" cheaper to train.
-5. **Compact CoT from scratch.** The Rizvi-Martel 2026 finding suggests latent reasoning behaves differently when learned in pretraining. This has not been explored with knowledge-light bases.
+1. **Parameter ratio for reasoning.** KLLMs and LMLM show knowledge-light pretraining helps evidence-grounded *factual* tasks, compared at equal model sizes. No source found reports a **score-vs-size curve on multi-step reasoning** (math, multi-hop, synthetic deduction) comparing knowledge-light and normal recipes under matched compute.
+2. **Which entities to remove.** KLLMs anonymizes all entities, or a random fraction of them. Removing only *long-tail* entities and keeping head concepts tests where the line between concept and fact falls. Realistic surrogate names vs typed placeholder tags is also untested.
+3. **Post-training a knowledge-light base.** Nobody has tested distillation or RL for reasoning, search, or compact CoT on a knowledge-light base.
+4. **Context utilization at small scale.** Pandey 2026 shows models of 7B and below largely ignore oracle context. Does a knowledge-light base, which *cannot* fall back on memory, learn to use context better? KLLMs' results hint yes, but only after fine-tuning per benchmark and only on factual tasks. This is untested on reasoning.
+5. **Knowledge vs reasoning interaction.** LIMO and SynthWorlds suggest stored knowledge helps reasoning. Neither tests a model *pretrained* without it, with facts supplied at test time.
+6. **Calibration from data, not from tuning.** KLLMs reports better abstention as a side effect of anonymization. Phase 3 can test whether this makes "I need to look this up" cheaper to train.
+7. **Compact CoT from scratch.** The Rizvi-Martel 2026 finding suggests latent reasoning behaves differently when learned in pretraining. This has not been explored with knowledge-light bases.

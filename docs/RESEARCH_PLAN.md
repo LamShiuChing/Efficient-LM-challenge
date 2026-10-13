@@ -36,7 +36,15 @@ Replace **long-tail named entities** with consistent random surrogates **within 
 
 Entity renaming keeps the data the same size and style. So a normal-vs-light comparison changes *only* knowledge content. This is why it's the headline intervention.
 
-**Prior art.** KLLMs (Cohen et al. 2026, see the literature review §3) already pretrains on entity-anonymized text. It reports lower closed-book recall plus gains on contextual QA, fact verification and abstention. We build on that and do not claim the intervention as new. Our contribution is the **size-ratio curve on multi-step reasoning**, together with the threshold sweep. Phase 0 should check whether KLLMs released code or data that can be reused.
+**Prior art.** KLLMs (Cohen et al. 2026, literature review §3) already pretrains on entity-anonymized text at 135M–3B. It uses typed placeholders (`PERSON184`), anonymizes all entities or a random fraction of them, and runs no RL. It reports a closed-book collapse plus gains on contextual QA, fact verification, hallucination detection and calibration, all at matched sizes. We build on that and do not claim the intervention as new. What we add:
+
+1. **Size ratio:** the parameters needed for a matched score, not gains at a fixed size.
+2. **Multi-step reasoning evals:** synthetic deduction, multi-hop, math. KLLMs reports none.
+3. **Frequency-based anonymization:** remove long-tail entities, keep head concepts. This tests where the line between concept and fact falls.
+4. **Realistic surrogate names vs typed placeholders:** a cheap ablation in Phase 1a.
+5. **Post-training:** distillation and RL on a knowledge-light base (Phases 2–5).
+
+Phase 0 checks whether KLLMs' code and models have been released, and reuses them if so.
 
 ### B. Document filtering (Track 1 ablations)
 
@@ -80,8 +88,8 @@ Notes:
 
 ## Phase 1 — Data equilibrium (Track 1) and the headline curve
 
-**1a. Renaming pilot (125M, fixed budget).** Normal vs entity-renamed at 3 long-tail thresholds.
-- Manipulation check: closed-book drops monotonically with threshold.
+**1a. Renaming pilot (125M, fixed budget).** Normal vs entity-renamed at 3 long-tail thresholds, plus one arm with KLLMs-style typed placeholders at full anonymization. That arm is both a replication anchor and the surrogate-names-vs-tags ablation.
+- Manipulation check: closed-book drops monotonically with threshold. The full-anonymization arm should collapse closed-book recall as KLLMs reports (LAMA falls from 34.7 to 3.9 at 1.7B). If it doesn't, the pipeline is broken. Stop and debug before going further.
 - Watch: language and common-sense metrics. Where they leave the noise floor is the first estimate of the knee.
 
 **1b. Slice ablations (125M, fixed budget).** Leave-one-slice-out and fact-density filtering (§1B, §1C). Output: a table of each slice's contribution to each metric group.
