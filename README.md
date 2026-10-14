@@ -53,7 +53,7 @@ Code directories (`src/`, `data/`, `evals/`, `configs/`) will be added as Phase 
 ## Status
 
 - [x] Literature review and research plan
-- [ ] **Phase 0** — reproduce a known GPT-2-small baseline; freeze eval suite; measure noise floor
+- [x] **Phase 0** — reproduce a known GPT-2-small baseline; freeze eval suite; measure noise floor
 - [ ] **Phase 1** — data-slice ablations (fixed token budget)
 - [ ] **Phase 2** — distillation + RL for reasoning
 - [ ] **Phase 3** — "I don't know" calibration + retrieval
