@@ -78,7 +78,7 @@ Notes:
 **Goal:** a training stack we trust, and numbers to judge every later result against.
 
 1. **Reproduce GPT-2 small (124M)** on FineWeb, with a small llm.c/nanochat-style PyTorch stack. The reference is llm.c's run: HellaSwag 29.9 after 10B tokens (literature review §10). Match it within the noise floor at the same token count, or at a shorter budget if the noise floor shows that is enough to validate the stack.
-2. **Measure throughput** on the local 4080 SUPER and on one rented 5090. All later token budgets are set from these measurements, not guessed.
+2. **Measure throughput** on the rented vast.ai GPU types we'd use (e.g. 5090, H100). Set all later token budgets and the $/run from these measurements, not guesses. Tokenized shards are built once on an instance and pushed to the HF Hub.
 3. **Build the eval harness** for all groups above, with closed-book / oracle-context / retrieved conditions.
 4. **Noise floor:** 3 seeds of the baseline at the Phase 1 size and token budget. Record the std of every metric. Drop or replace metrics that are pure noise at this scale.
 5. **Size ladder:** fix the model shapes (e.g. ~30M, 60M, 125M, 350M non-embedding; 760M+ rented) and the LR/batch rule per size. Use one small LR sweep at two sizes. The rule is then fixed, not re-tuned per arm.

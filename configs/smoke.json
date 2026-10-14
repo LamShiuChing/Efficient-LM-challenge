@@ -1,0 +1,9 @@
+{
+  "run_name": "smoke",
+  "synthetic": true,
+  "block_size": 128, "n_layer": 2, "n_head": 2, "n_embd": 64,
+  "total_batch_size": 4096, "micro_batch_size": 16,
+  "max_steps": 100, "lr": 0.001, "warmup_steps": 10,
+  "val_every": 50, "val_tokens": 8192, "ckpt_every": 50, "log_every": 10,
+  "compile": false
+}

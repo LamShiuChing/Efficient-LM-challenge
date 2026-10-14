@@ -74,7 +74,7 @@ Checkpoints and logs stay out of git (see `.gitignore`). The experiment file lin
 
 ## 9. Hardware
 
-- Local: RTX 4080 SUPER (16 GB). Rented (vast.ai): RTX 5090 or larger, when a run doesn't fit locally or would take too long.
+- All runs are on rented vast.ai GPUs. No training or eval runs on the developer's local machine. Data and shards live on the Hugging Face Hub, and each run's data manifest names the Hub repo and revision.
 - Within one comparison, keep all arms on the same GPU type when possible. If not, note it in **Deviations**.
 
 ## 10. Report honestly

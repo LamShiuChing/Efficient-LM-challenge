@@ -1,0 +1,14 @@
+{
+  "_source": "llm.c GPT-2 124M FineWeb-10B reference run, https://github.com/karpathy/llm.c/discussions/481 (-b 64 -t 1024 -d 524288 -l 0.0006 -u 700 -q 0.0 -c 0.1 -v 250 -n 5000; 18865 steps = 1 epoch ~9.9B tokens; HellaSwag 29.9)",
+  "run_name": "gpt2_124m_fineweb10B",
+  "train_pattern": "data_cache/fineweb10B/fineweb_train_*.bin",
+  "val_pattern": "data_cache/fineweb10B/fineweb_val_*.bin",
+  "block_size": 1024, "vocab_size": 50304, "n_layer": 12, "n_head": 12, "n_embd": 768,
+  "total_batch_size": 524288,
+  "micro_batch_size": 16,
+  "max_steps": 18865,
+  "lr": 0.0006, "min_lr_frac": 0.0, "warmup_steps": 700, "decay": "cosine",
+  "weight_decay": 0.1, "beta1": 0.9, "beta2": 0.95, "eps": 1e-8, "grad_clip": 1.0,
+  "val_every": 250, "val_tokens": 10485760, "ckpt_every": 5000,
+  "compile": true
+}

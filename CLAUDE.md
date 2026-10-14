@@ -27,8 +27,9 @@ The deliverable is **trustworthy evidence**, not a model. A clean null result is
 
 ## Hardware
 
-- Local: RTX 4080 SUPER, 16 GB. Default for anything up to ~150M params.
-- Rented: vast.ai, RTX 5090 or larger, for bigger sizes or long sweeps. Ask the user before renting. It costs money.
+- **No local compute.** The user's PC is their daily machine. Do not run training, evals, benchmarks, data prep or tokenizing on it, and not on its GPU or heavily on its CPU. Locally, only edit code and docs, use git, and make light CLI calls.
+- **Compute: vast.ai** (`vastai` CLI is configured). Every run happens on a rented instance. Confirm the budget with the user before renting.
+- **Data: Hugging Face Hub** (account `lamshiu`). Raw data is pulled from the Hub on the instance. Tokenized shards, eval sets and results that need to persist are pushed to Hub dataset repos, not stored on the PC.
 
 ## Long autonomous runs
 

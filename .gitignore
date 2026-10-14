@@ -5,3 +5,4 @@ runs/
 checkpoints/
 *.pt
 *.safetensors
+data_cache/
