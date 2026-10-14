@@ -7,6 +7,7 @@
 #   bash scripts/vast_job.sh eval <hf:gpt2|ckpt:runs/x/ckpt.pt> <out_name> <dev|test>   (ckpt fetched from HF if absent)
 #   bash scripts/vast_job.sh valloss <runs/x/ckpt.pt> <normal|arm> <out_name>              (loss on that val shard)
 # Jobs can be chained: `bench prep`. Env: HF_TOKEN (write). MAX_HOURS caps the whole script (default 1).
+# EVAL_TASKS=a,b limits eval jobs to those tasks (default: the whole suite).
 # DATA_ARM=<arm> makes train fetch that renamed arm into data_cache/<arm>/; point the run at it with
 #   '--train_pattern=data_cache/<arm>/fineweb_train_*.bin' '--val_pattern=data_cache/<arm>/fineweb_val_*.bin'
 # Whatever happens, the log is uploaded to HF and the instance destroys itself (budget safety).
@@ -96,7 +97,7 @@ while [ $# -gt 0 ]; do
       pip install -q datasets==5.0.1 transformers==5.13.0 || exit 1
       python -m evals.test_harness || exit 1
       mkdir -p evals_out
-      python -m evals.run --model "$model" --split "$split" --out "evals_out/$out.json" || exit 1
+      python -m evals.run --model "$model" --split "$split" --out "evals_out/$out.json" ${EVAL_TASKS:+--tasks "$EVAL_TASKS"} || exit 1
       hf upload "$RUNS_REPO" "evals_out/$out.json" "evals/$out.json" --no-private || exit 1 ;;
     valloss)  # valloss <runs/x/ckpt.pt> <normal|arm> <out_name> -> runs repo evals/<out_name>.json
       ck=$1 which=$2 out=$3; shift 3

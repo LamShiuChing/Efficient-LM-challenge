@@ -17,7 +17,7 @@ os.environ.setdefault("HF_HOME", str(ROOT / "data_cache" / "hf"))  # C: is nearl
 import numpy as np
 import torch
 
-SUITE_VERSION = "evals-v0.2-dev"
+SUITE_VERSION = "evals-v0.3-dev"  # v0.3 adds the renamed PopQA variants; v0.2 tasks unchanged
 EOT = 50256  # gpt2 <|endoftext|>, used as the context when a task has none (BLiMP)
 SEED = 0     # dev carve-outs and bootstrap
 
@@ -180,17 +180,51 @@ def popqa_build(rows):
     return out
 
 
-def popqa(split, oracle):
+# Renamed variants (experiment 003): NER label of (subject, object) per relation, for typed tags. Object None =
+# a common noun (occupation, genre, ...) that training-time NER would not tag, so it is kept.
+POPQA_ENT = {
+    "occupation": ("PERSON", None), "place of birth": ("PERSON", "GPE"), "genre": ("WORK_OF_ART", None),
+    "father": ("PERSON", "PERSON"), "mother": ("PERSON", "PERSON"), "country": ("LOC", "GPE"),
+    "producer": ("WORK_OF_ART", "PERSON"), "director": ("WORK_OF_ART", "PERSON"),
+    "screenwriter": ("WORK_OF_ART", "PERSON"), "composer": ("WORK_OF_ART", "PERSON"),
+    "author": ("WORK_OF_ART", "PERSON"), "capital": ("GPE", "GPE"), "capital of": ("GPE", "GPE"),
+    "color": ("PRODUCT", None), "religion": ("PERSON", None), "sport": ("PERSON", None),
+}
+
+
+def rename_item(texts, names, arm, idx):
+    """Rename names {surface: label} in the strings of one item exactly as data/rename_entities.py renamed a
+    training doc (arm "r100": pseudo-word surrogates, "tag100": typed tags). The item is one doc, so a name gets
+    the same replacement in context, question and choices. Longer names win where names overlap."""
+    import re
+    import sys
+    sys.path.insert(0, str(ROOT / "data"))
+    from rename_entities import rename_doc
+    names = {re.sub(r"^[Tt]he\s+", "", n): lab for n, lab in names.items()}  # training spans drop a leading "the"
+    text, spans = "\x00".join(texts), []
+    for name in sorted(names, key=len, reverse=True):
+        for m in re.finditer(r"(?<!\w)%s(?!\w)" % re.escape(name), text):
+            if all(m.end() <= s or m.start() >= e for s, e, _ in spans):
+                spans.append((m.start(), m.end(), names[name]))
+    return rename_doc(text, sorted(spans), arm, idx)[0].split("\x00")
+
+
+def popqa(split, oracle, rename=None):
     # No official dev split: seeded 50/50 partition of the deduped questions. Items stay in permuted
     # order, so --limit takes a random sample instead of the first relation in the file.
     recs = popqa_build(_load("akariasai/PopQA", "test"))
     perm = np.random.default_rng(SEED).permutation(len(recs))
     half = perm[:len(recs) // 2] if split == "dev" else perm[len(recs) // 2:]
     items = []
-    for r in (recs[i] for i in half):
+    for i in half:
+        r = recs[i]
         ctx = (" ".join(POPQA_TEMPLATES[r["prop"]].format(subj=s, obj=o) for s, o in r["facts"]) + "\n") if oracle else ""
-        items.append({"choices": [(ctx + f"Q: {r['question']}\nA:", " " + a) for a in r["answers"]],
-                      "label": r["label"], "bucket": r["bucket"], "prior": r["prior"]})
+        q, ans = r["question"], [" " + a for a in r["answers"]]
+        if rename:  # every fact subject, and the objects when they are entities; never the "Q:"/"A:" scaffold
+            sl, ol = POPQA_ENT[r["prop"]]
+            names = {**({a: ol for a in r["answers"]} if ol else {}), **{s: sl for s, _ in r["facts"]}}
+            ctx, q, *ans = rename_item([ctx, q, *ans], names, rename, int(i))
+        items.append({"choices": [(ctx + f"Q: {q}\nA:", a) for a in ans], "label": r["label"], "bucket": r["bucket"], "prior": r["prior"]})
     return items
 
 
@@ -240,9 +274,12 @@ def synth(split, hops):
 TASKS = {"hellaswag": hellaswag, "piqa": piqa, "winogrande": winogrande, "arc_easy": arc_easy,
          "lambada": lambada, "blimp": blimp,
          "popqa_closed": lambda s: popqa(s, oracle=False), "popqa_oracle": lambda s: popqa(s, oracle=True),
+         "popqa_oracle_surr": lambda s: popqa(s, True, "r100"), "popqa_oracle_tag": lambda s: popqa(s, True, "tag100"),
+         "popqa_closed_surr": lambda s: popqa(s, False, "r100"),
          "synth_1hop": lambda s: synth(s, 1), "synth_2hop": lambda s: synth(s, 2)}
 # tasks whose choices differ in length
-NORM_TASKS = {"hellaswag", "piqa", "arc_easy", "popqa_closed", "popqa_oracle", "synth_1hop", "synth_2hop"}
+NORM_TASKS = {"hellaswag", "piqa", "arc_easy", "popqa_closed", "popqa_oracle", "popqa_oracle_surr", "popqa_oracle_tag",
+              "popqa_closed_surr", "synth_1hop", "synth_2hop"}
 
 
 @torch.no_grad()

@@ -102,6 +102,25 @@ for split in ("dev", "test"):
         rec = next(x for x in recs if f"Q: {x['question']}" in ctx)
         assert POPQA_TEMPLATES[rec["prop"]].format(subj=rec["subj"], obj=rec["answers"][rec["label"]]) in ctx
 
+# Renamed variants (experiment 003): every fact subject and entity answer replaced, consistently across context,
+# question and choices; nothing else changes.
+for split in ("dev", "test"):
+    real = harness.popqa(split, oracle=True)
+    for arm in ("r100", "tag100"):
+        ren = harness.popqa(split, True, arm)
+        assert ren == harness.popqa(split, True, arm) and len(ren) == len(real)
+        for it, rr in zip(ren, real):
+            ctx, rctx = it["choices"][0][0], rr["choices"][0][0]
+            assert it["label"] == rr["label"] and ctx.count(".") == rctx.count(".") == 4
+            assert all(c[1].strip() in ctx for c in it["choices"]), ctx  # choices renamed like the context
+            rec = next(x for x in recs if f"Q: {x['question']}" in rctx)
+            for name in [s for s, _ in rec["facts"]] + (rec["answers"] if harness.POPQA_ENT[rec["prop"]][1] else []):
+                assert not re.search(r"(?<!\w)%s(?!\w)" % re.escape(name), ctx), (name, ctx)
+            if arm == "tag100" and rec["prop"] == "country":
+                assert re.fullmatch(r" (?:the )?GPE_\d", it["choices"][it["label"]][1]) and "LOC_1" in ctx, it
+    closed = harness.popqa(split, False, "r100")
+    assert all(it["choices"][0][0].startswith("Q: ") for it in closed)  # closed-book: no context added
+
 # Synthetic: parse each context back into facts and check the item logic.
 PF = re.compile(r"(\w+) (?:works in|lives in|was born in) (\w+)\.")
 CF = re.compile(r"(\w+) is a city in (\w+)\.")
