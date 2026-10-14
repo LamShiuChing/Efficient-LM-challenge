@@ -18,6 +18,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export HF_HOME=/workspace/hf HF_HUB_ENABLE_HF_TRANSFER=0 PIP_BREAK_SYSTEM_PACKAGES=1  # container's system python (PEP 668)
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # less fragmentation: 1B training sits near the 32 GB limit
 DATA_REPO=lamshiu/efficient-lm-fineweb10B-gpt2   # dataset repo: tokenized shards + manifest.json
 RENAMED_REPO=lamshiu/efficient-lm-fineweb-renamed # dataset repo: <arm>/ shards + manifest.json, ner/ spans + entity table
 RUNS_REPO=lamshiu/efficient-lm-runs              # model repo: runs/<name>/ logs + checkpoints, jobs/ logs

@@ -1,11 +1,11 @@
 {
-  "_source": "docs/PLAN_1B.md: 1B (18 x 2048, 16 heads, RoPE, 4K context), 10.0B tokens = 9537 steps x 2^20 tokens (~10 tokens/param). GPT-3 1.3B-style batch (~1M tokens); lr 3e-4 (Pythia-1B), cosine to 10%, warmup 360 steps (~375M tokens, GPT-3). micro_batch_size set from the 1B benchmark. Numbered bf16 checkpoints every 954 steps (~10%) for the early check.",
+  "_source": "docs/PLAN_1B.md: 1B (18 x 2048, 16 heads, RoPE, 4K context), 10.0B tokens = 9537 steps x 2^20 tokens (~10 tokens/param). GPT-3 1.3B-style batch (~1M tokens); lr 3e-4 (Pythia-1B), cosine to 10%, warmup 360 steps (~375M tokens, GPT-3). micro_batch_size 1: the 2026-10-14 benchmark on an RTX 5090 (32 GB) ran out of memory at 2 (1 GPU: 22.2K tok/s, 26 GB; 2 GPUs DDP: 37.6K tok/s, 30 GB). Numbered bf16 checkpoints every 954 steps (~10%) for the early check.",
   "run_name": "gpt_1b_10B",
   "train_pattern": "data_cache/fineweb10B/fineweb_train_*.bin",
   "val_pattern": "data_cache/fineweb10B/fineweb_val_*.bin",
   "block_size": 4096, "vocab_size": 50304, "n_layer": 18, "n_head": 16, "n_embd": 2048, "pos": "rope",
   "total_batch_size": 1048576,
-  "micro_batch_size": 2,
+  "micro_batch_size": 1,
   "max_steps": 9537,
   "lr": 0.0003, "min_lr_frac": 0.1, "warmup_steps": 360, "decay": "cosine",
   "weight_decay": 0.1, "beta1": 0.9, "beta2": 0.95, "eps": 1e-8, "grad_clip": 1.0,

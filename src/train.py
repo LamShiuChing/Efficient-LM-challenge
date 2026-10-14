@@ -212,7 +212,9 @@ def main(argv):
         del st
     model = torch.compile(raw_model) if cfg["compile"] else raw_model
     if ddp:
-        model = DistributedDataParallel(model, device_ids=[local] if device.startswith("cuda") else None)
+        # gradient_as_bucket_view: grads live in the all-reduce buckets, no second copy (1B on 32 GB is tight)
+        model = DistributedDataParallel(model, device_ids=[local] if device.startswith("cuda") else None,
+                                        gradient_as_bucket_view=True)
 
     if not bench and master and not resumed:
         if (run_dir / "log.jsonl").exists() and not cfg["exploratory"]:
