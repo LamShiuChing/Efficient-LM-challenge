@@ -2,7 +2,7 @@
 
 > Frozen sections above the line. See [`docs/EXPERIMENT_PROTOCOL.md`](../docs/EXPERIMENT_PROTOCOL.md).
 
-- **Status:** preregistered
+- **Status:** running
 - **Phase / track:** Phase 1a / Track 1
 - **Date preregistered:** 2026-10-14
 - **Spec commit:** the commit that adds this file
@@ -87,6 +87,32 @@ All four arms are compared with the normal arm on the `test` split. Noise floor 
 
 ## Deviations
 
+- **Training commit is `cb8c6bf`, not the spec commit.** The diff since `9b97f2b` touches only `experiments/001` and `README.md`, so code, configs and evals are identical.
+- **Run names:** `e002_gpt2_124m_2p5B_<arm>`, seed 1337. Training only on each instance; all evals run later on one instance, as planned.
+- **Data stage** (instance 55892933) finished at ~06:24 ET, 2026-10-14, then self-destroyed. NER took ~95 min at ~716 docs/s on 245 workers; the 4 arms took ~8 min each.
+
 ## Results
+
+### Data (from each arm's `manifest.json` on HF)
+
+NER pass: 4.0M docs (143,468 val + train), 98.9M entity mentions, 20.7M distinct (surface, label) keys, 17.2M of them seen in only one doc. Largest labels by mentions: ORG 35.5M, PERSON 31.3M, GPE 16.8M.
+
+| arm | df threshold | mention frac | renamed / mentions | propagated | residual per renamed | tokens changed | token ratio | train tokens | train shards |
+|---|---|---|---|---|---|---|---|---|---|
+| r50 | 128 | 0.500 | 49,446,884 / 98,869,392 | 5,216,255 | 0.056 | 0.097 | 1.033 | 2.76B | 28 |
+| r80 | 5,229 | 0.800 | 79,091,761 / 98,869,392 | 8,801,858 | 0.026 | 0.129 | 1.047 | 2.79B | 28 |
+| r100 | 162,864 | 1.000 | 98,869,392 / 98,869,392 | 9,692,743 | 0.016 | 0.147 | 1.059 | 2.82B | 29 |
+| tag100 | 162,864 | 1.000 | 98,869,392 / 98,869,392 | 9,692,743 | 0.014 | 0.141 | 1.044 | 2.78B | 28 |
+
+Training reads the first 2.50B train tokens of each arm (4768 steps). Every arm has more than that, so no data repeats. Because the token ratio is above 1, each arm sees ~3–6% fewer documents than the normal arm.
+
+### Training
+
+| arm | instance | started (ET) | tok/s |
+|---|---|---|---|
+| r50 | 55906528 (BE) | 06:02 | 188k |
+| r80 | 55907606 (SE) | 06:11 | 173k |
+| r100 | 55909069 (PL) | 06:21 | (pending) |
+| tag100 | 55909606 (VN) | 06:28 | (pending) |
 
 ## Conclusion
