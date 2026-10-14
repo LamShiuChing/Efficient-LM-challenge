@@ -2,7 +2,7 @@
 
 > Frozen sections above the line. See [`docs/EXPERIMENT_PROTOCOL.md`](../docs/EXPERIMENT_PROTOCOL.md).
 
-- **Status:** preregistered
+- **Status:** done
 - **Phase / track:** Phase 1a follow-up / Track 1. Eval only, no training.
 - **Date preregistered:** 2026-10-14
 - **Spec commit:** the commit that adds this file
@@ -76,6 +76,52 @@ Notation: Δ = arm − mean of the 3 normal seeds (e001 s1337/1338/1339), on gol
 
 ## Deviations
 
+- **The `popqa_oracle_tag` variant has an index shortcut, found after the run** while inspecting items. Tags are numbered by first appearance, as in training, so the object tag's number often reveals the answer. Example: "The screenwriter of WORK_OF_ART_2 was PERSON_2 … Q: Who was the screenwriter for WORK_OF_ART_2?". For same-type relations the gold is the next number. Accuracy and gold_lp on this variant therefore measure index matching as well as context use. **tag100's home-turf result is not reported as evidence.** The surrogate variant has no such shortcut.
+- The control's preregistered wording, "within ±0.03 of the majority baseline", misses narrowly on dev (acc 0.250–0.255 vs majority 0.283, a gap of 0.028–0.033). The failure condition in the decision table (acc > majority + 0.03) is not met. For renamed items the relevant floor is uniform chance (0.25): the renamed answers no longer carry the identity the majority prior uses.
+- Instance 55966902 (RTX 5090, CA) ran 13:45–13:59 ET, 14 eval jobs, ~$0.2. No other changes.
+
 ## Results
 
+Gold log-prob per token on **dev**. Δ = arm − mean of the 3 normal seeds; σ = the normal seed std. Test agrees to within ±0.03 on every Δ. Reproduce with `scratchpad e003.py` logic, or `scripts/summarize.py e003_<model> --split dev`.
+
+| task | normal (σ) | r50 Δ | r80 Δ | r100 Δ | tag100 Δ |
+|---|---|---|---|---|---|
+| popqa_oracle, real names (002) | -3.51 (0.07) | -0.47 | -1.20 | -1.78 | -1.92 |
+| **popqa_oracle_surr** (surrogate names) | -4.09 (0.06) | **+0.12** | **+0.04** | **+0.23** | -1.00 |
+| popqa_oracle_tag (typed tags, *shortcut, see Deviations*) | -3.26 (0.27) | -0.62 | -0.86 | -0.38 | +0.87 |
+| popqa_closed_surr (no context) | -9.75 (0.07) | +0.81 | +0.79 | +0.71 | -0.25 |
+
+Accuracy (dev; majority 0.283, uniform chance 0.25):
+
+| task | normal | r50 | r80 | r100 | tag100 |
+|---|---|---|---|---|---|
+| popqa_oracle (real names, 002) | 0.304 | 0.284 | 0.268 | 0.262 | 0.271 |
+| popqa_oracle_surr | 0.244 | 0.242 | 0.248 | 0.241 | 0.247 |
+| popqa_closed_surr | 0.252 | 0.251 | 0.255 | 0.252 | 0.253 |
+
+Context gain on surrogate items (oracle_surr − closed_surr gold_lp): normal +5.67, r50 +4.98, r80 +4.91, r100 +5.19.
+
+**Prediction check:**
+
+1. **`H_name` (Δ ≥ −2σ on home turf).**
+   - r100 on surrogates: +0.23 (2σ = 0.12) → **hit**. The −1.78 real-name deficit disappears and slightly reverses.
+   - r50 (+0.12) and r80 (+0.04) also hit.
+   - tag100: home-turf result invalid (shortcut). On surrogates, which are foreign to it, it is −1.00, which fits the familiarity story.
+2. **Control:** no leakage. Closed-book accuracy on renamed items is at chance (0.25) for every model.
+
 ## Conclusion
+
+**Under the preregistered rule, the 002 oracle drop is explained by name unfamiliarity, not by damaged context use.**
+
+- When the names in the prompt look like the names a model was trained on, renamed models are not worse than normal ones. The deficit follows the *name style*, not the arm:
+  - surrogate-trained arms lose with real names and win with surrogates;
+  - tag100 loses with surrogates.
+- The decision-table row is "`H_name` → a knowledge-light recipe must keep real names in pretraining (real-name swap or LMLM-style lookup); **user decision**".
+
+**Important limit.** At 124M and 2.5B tokens, **no model reads facts from context in accuracy terms**, normal included.
+
+- Surrogate oracle accuracy is at chance for all models.
+- With real names, the oracle does not beat closed-book even for normal models (0.304 vs 0.318).
+- The gold_lp differences mostly track *string familiarity*: renamed arms already score +0.7 on surrogate answers *without* context. Their context gain on surrogate items (+4.9 to +5.2) is somewhat *below* normal's (+5.7), though the lower base makes that comparison loose.
+
+So this experiment shows that renaming did not *break* reading. It cannot show that renaming *helps* reading: there was almost no reading at this scale to begin with. That needs a larger and longer-trained model with real names, which is the user's proposed direction (1B, longer context, real names).
