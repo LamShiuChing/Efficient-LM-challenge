@@ -90,6 +90,8 @@ All four arms are compared with the normal arm on the `test` split. Noise floor 
 - **Training commit is `cb8c6bf`, not the spec commit.** The diff since `9b97f2b` touches only `experiments/001` and `README.md`, so code, configs and evals are identical.
 - **Run names:** `e002_gpt2_124m_2p5B_<arm>`, seed 1337. Training only on each instance; all evals run later on one instance, as planned.
 - **tag100 cap extended.** Its host runs at 153k tok/s, so training needs ~4.6 h, more than `MAX_HOURS=4.5`. At 06:39 ET the on-instance watchdog was replaced over SSH (fires ~11:23 ET, ~4.9 h total, ~$3.1) and the local watchdog was moved to ~11:40 ET. Extending was preferred to re-renting: it costs ~$0.5 more but avoids the risk of another slow or stuck host.
+- **Evals split across two instances.** The 3 normal checkpoints (e001 s1337/1338/1339) were scored early, on instance 55911613 (06:41–06:56 ET, ~$0.16), while the arms trained. That checked the new v0.2 tasks at full size before they mattered. The arms are scored later on a second instance. Both use the same commit `cb8c6bf`, the same GPU type and the same suite. Outputs are `evals/e002_e001s<seed>_{dev,test,valnormal}.json`.
+- `scripts/summarize.py` now also prints the PopQA popularity-bucket metrics. This is reporting only; scoring is unchanged.
 - **Data stage** (instance 55892933) finished at ~06:24 ET, 2026-10-14, then self-destroyed. NER took ~95 min at ~716 docs/s on 245 workers; the 4 arms took ~8 min each.
 
 ## Results
@@ -106,6 +108,27 @@ NER pass: 4.0M docs (143,468 val + train), 98.9M entity mentions, 20.7M distinct
 | tag100 | 162,864 | 1.000 | 98,869,392 / 98,869,392 | 9,692,743 | 0.014 | 0.141 | 1.044 | 2.78B | 28 |
 
 Training reads the first 2.50B train tokens of each arm (4768 steps). Every arm has more than that, so no data repeats. Because the token ratio is above 1, each arm sees ~3–6% fewer documents than the normal arm.
+
+### Noise floor on `evals-v0.2-dev` (normal arm, 3 seeds, `dev` split)
+
+`evals.val_loss` on the normal val shard reproduces the training-time val loss (s1339: 3.5668 in both), a consistency check.
+
+| metric | mean | std | chance / majority |
+|---|---|---|---|
+| popqa_closed acc | 0.318 | 0.001 | 0.283 |
+| popqa_closed head acc | 0.394 | 0.004 | 0.261 |
+| popqa_closed tail acc | 0.273 | 0.005 | 0.298 |
+| popqa_closed gold_lp | -6.97 | 0.065 | – |
+| popqa_closed tail gold_lp | -7.62 | 0.121 | – |
+| popqa_oracle acc | 0.304 | 0.004 | 0.278 |
+| popqa_oracle head acc | 0.354 | 0.006 | 0.261 |
+| popqa_oracle gold_lp | -3.51 | 0.070 | – |
+| synth_1hop acc | 0.295 | 0.002 | 0.25 |
+| synth_1hop gold_lp | -1.65 | 0.091 | – |
+| synth_2hop acc | 0.243 | 0.006 | 0.25 |
+| synth_2hop gold_lp | -1.91 | 0.085 | – |
+
+**A floor effect, noted before any arm is scored.** At 124M and 2.5B tokens, the normal model has closed-book signal only on head (popular) PopQA facts. On tail facts it is at the majority baseline. It barely uses the oracle context: oracle acc 0.304 vs majority 0.278, and on the head bucket oracle (0.354) is *below* closed-book (0.394). It is near chance on synth 1-hop and at chance on 2-hop. So for prediction 3, "no drop" is weakly informative in accuracy terms, and the gold log-prob variants carry most of the signal. For prediction 1, the tail-bucket accuracy is already at floor, so a tail-vs-head comparison must use gold_lp.
 
 ### Training
 

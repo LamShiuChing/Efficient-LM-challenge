@@ -41,6 +41,9 @@ def metrics(name, split):
             out[f"{task}.gold_lp"] = r["gold_logprob_per_tok"]
         if "ppl" in r:
             out[f"{task}.ppl"] = r["ppl"]
+        for b, rb in r.get("buckets", {}).items():  # popqa popularity buckets
+            out[f"{task}.{b}.acc"] = rb["acc"]
+            out[f"{task}.{b}.gold_lp"] = rb["gold_logprob_per_tok"]
     return out
 
 
