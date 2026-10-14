@@ -6,3 +6,4 @@ checkpoints/
 *.pt
 *.safetensors
 data_cache/
+evals_out/

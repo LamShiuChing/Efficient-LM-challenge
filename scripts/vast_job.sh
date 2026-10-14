@@ -3,6 +3,7 @@
 #   bash scripts/vast_job.sh bench          # 124M throughput, eager vs compile, several micro-batches
 #   bash scripts/vast_job.sh prep           # FineWeb 10B -> shards -> HF dataset repo
 #   bash scripts/vast_job.sh train <config> [--key=value ...]
+#   bash scripts/vast_job.sh eval <hf:gpt2|ckpt:runs/x/ckpt.pt> <out_name> <dev|test>
 # Jobs can be chained: `bench prep`. Env: HF_TOKEN (write). MAX_HOURS caps the whole script (default 1).
 # Whatever happens, the log is uploaded to HF and the instance destroys itself (budget safety).
 set -uo pipefail
@@ -33,8 +34,13 @@ tok_ok() { python -c "import tiktoken; tiktoken.get_encoding('gpt2')"; }
 for i in 1 2 3 4 5; do tok_ok && break; sleep 20; done
 tok_ok || exit 1
 
-fetch_data() {
-  hf download "$DATA_REPO" --repo-type dataset --local-dir data_cache/fineweb10B
+fetch_data() {  # TRAIN_SHARDS=N fetches val + the first N train shards (100M tokens each); default all
+  local files=()
+  if [ -n "${TRAIN_SHARDS:-}" ]; then
+    files=(manifest.json fineweb_val_000000.bin)
+    for i in $(seq 1 "$TRAIN_SHARDS"); do files+=("$(printf 'fineweb_train_%06d.bin' "$i")"); done
+  fi
+  hf download "$DATA_REPO" "${files[@]}" --repo-type dataset --local-dir data_cache/fineweb10B
 }
 
 while [ $# -gt 0 ]; do
@@ -53,6 +59,8 @@ while [ $# -gt 0 ]; do
       cfg=$1; shift; args=()
       while [ $# -gt 0 ] && [[ $1 == --* ]]; do args+=("$1"); shift; done
       fetch_data || exit 1
+      # torch.compile (triton) builds a small C launcher: needs gcc + Python headers (absent in -runtime image)
+      command -v gcc >/dev/null || { apt-get update -qq && apt-get install -y -qq gcc python3-dev >/dev/null; } || exit 1
       name=$(python -c "import json,sys;print(json.load(open(sys.argv[1]))['run_name'])" "$cfg")
       for a in "${args[@]}"; do [[ $a == --run_name=* ]] && name=${a#--run_name=}; done
       mkdir -p "runs/$name"
@@ -60,6 +68,13 @@ while [ $# -gt 0 ]; do
       python src/train.py "$cfg" "${args[@]}"; rc=$?
       hf upload "$RUNS_REPO" "runs/$name" "runs/$name" --no-private || exit 1
       [ $rc -eq 0 ] || exit $rc ;;
+    eval)  # eval <hf:name|ckpt:path> <out_name> <dev|test>: harness -> runs repo evals/<out_name>.json
+      model=$1 out=$2 split=$3; shift 3
+      pip install -q datasets==5.0.1 transformers==5.13.0 || exit 1
+      python -m evals.test_harness || exit 1
+      mkdir -p evals_out
+      python -m evals.run --model "$model" --split "$split" --out "evals_out/$out.json" || exit 1
+      hf upload "$RUNS_REPO" "evals_out/$out.json" "evals/$out.json" --no-private || exit 1 ;;
     *) echo "unknown job $job"; exit 1 ;;
   esac
 done
