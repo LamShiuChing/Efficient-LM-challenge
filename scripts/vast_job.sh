@@ -26,6 +26,12 @@ trap finish EXIT
 
 echo "== $JOB_ID commit $(git rev-parse HEAD) gpu $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 pip install -q tiktoken==0.12.0 huggingface_hub==1.22.0 pyarrow numpy || exit 1
+# Fetch the gpt2 BPE files once, with retries, before any multiprocessing pool:
+# 30 workers each downloading them at the same time timed out.
+export TIKTOKEN_CACHE_DIR=/workspace/tiktoken
+tok_ok() { python -c "import tiktoken; tiktoken.get_encoding('gpt2')"; }
+for i in 1 2 3 4 5; do tok_ok && break; sleep 20; done
+tok_ok || exit 1
 
 fetch_data() {
   hf download "$DATA_REPO" --repo-type dataset --local-dir data_cache/fineweb10B

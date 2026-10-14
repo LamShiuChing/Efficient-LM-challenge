@@ -28,7 +28,8 @@ The deliverable is **trustworthy evidence**, not a model. A clean null result is
 ## Hardware
 
 - **No local compute.** The user's PC is their daily machine. Do not run training, evals, benchmarks, data prep or tokenizing on it, and not on its GPU or heavily on its CPU. Locally, only edit code and docs, use git, and make light CLI calls.
-- **Compute: vast.ai** (`vastai` CLI is configured). Every run happens on a rented instance. Confirm the budget with the user before renting.
+- **Compute: vast.ai** (`vastai` CLI is configured). Every run happens on a rented instance. Confirm the budget with the user before renting. Jobs run via `scripts/vast_job.sh`, which always uploads its log and destroys the instance. Also keep a local watchdog that destroys it after the cap.
+- **Stuck instances:** if a new instance isn't `running` within ~5 minutes, destroy it and rent a different offer. Prefer the `-runtime` image, which pulls faster.
 - **Data: Hugging Face Hub** (account `lamshiu`). Raw data is pulled from the Hub on the instance. Tokenized shards, eval sets and results that need to persist are pushed to Hub dataset repos, not stored on the PC.
 
 ## Long autonomous runs
