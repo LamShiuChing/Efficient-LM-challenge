@@ -89,6 +89,7 @@ All four arms are compared with the normal arm on the `test` split. Noise floor 
 
 - **Training commit is `cb8c6bf`, not the spec commit.** The diff since `9b97f2b` touches only `experiments/001` and `README.md`, so code, configs and evals are identical.
 - **Run names:** `e002_gpt2_124m_2p5B_<arm>`, seed 1337. Training only on each instance; all evals run later on one instance, as planned.
+- **tag100 cap extended.** Its host runs at 153k tok/s, so training needs ~4.6 h, more than `MAX_HOURS=4.5`. At 06:39 ET the on-instance watchdog was replaced over SSH (fires ~11:23 ET, ~4.9 h total, ~$3.1) and the local watchdog was moved to ~11:40 ET. Extending was preferred to re-renting: it costs ~$0.5 more but avoids the risk of another slow or stuck host.
 - **Data stage** (instance 55892933) finished at ~06:24 ET, 2026-10-14, then self-destroyed. NER took ~95 min at ~716 docs/s on 245 workers; the 4 arms took ~8 min each.
 
 ## Results
@@ -112,7 +113,7 @@ Training reads the first 2.50B train tokens of each arm (4768 steps). Every arm 
 |---|---|---|---|
 | r50 | 55906528 (BE) | 06:02 | 188k |
 | r80 | 55907606 (SE) | 06:11 | 173k |
-| r100 | 55909069 (PL) | 06:21 | (pending) |
-| tag100 | 55909606 (VN) | 06:28 | (pending) |
+| r100 | 55909069 (PL) | 06:21 | 190k |
+| tag100 | 55909606 (VN) | 06:28 | 153k |
 
 ## Conclusion
