@@ -7,7 +7,7 @@
 # Whatever happens, the log is uploaded to HF and the instance destroys itself (budget safety).
 set -uo pipefail
 cd "$(dirname "$0")/.."
-export HF_HOME=/workspace/hf HF_HUB_ENABLE_HF_TRANSFER=0
+export HF_HOME=/workspace/hf HF_HUB_ENABLE_HF_TRANSFER=0 PIP_BREAK_SYSTEM_PACKAGES=1  # container's system python (PEP 668)
 DATA_REPO=lamshiu/efficient-lm-fineweb10B-gpt2   # dataset repo: tokenized shards + manifest.json
 RUNS_REPO=lamshiu/efficient-lm-runs              # model repo: runs/<name>/ logs + checkpoints, jobs/ logs
 JOB_ID="$(date -u +%Y%m%dT%H%M%SZ)-${CONTAINER_ID:-local}"
@@ -17,15 +17,15 @@ exec > >(tee -a "$LOG") 2>&1
 finish() {
   echo "== finish $(date -u)"
   timeout 900 hf upload "$RUNS_REPO" "$LOG" "jobs/$JOB_ID.log" --no-private || echo "log upload failed"
-  vastai destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" -y || vastai destroy instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY"
+  # REST call, so self-destroy works even if pip installs failed (docs.vast.ai/api-reference/instances/destroy-instance)
+  curl -sS -X DELETE "https://console.vast.ai/api/v0/instances/$CONTAINER_ID" -H "Authorization: Bearer $CONTAINER_API_KEY"
 }
 trap finish EXIT
 # ponytail: one wall-clock cap for the whole script; destroying the instance kills everything still running
 ( sleep "${MAX_HOURS:-1}h"; echo "== MAX_HOURS=${MAX_HOURS:-1} hit"; finish ) &
 
 echo "== $JOB_ID commit $(git rev-parse HEAD) gpu $(nvidia-smi --query-gpu=name --format=csv,noheader)"
-pip install -q tiktoken==0.12.0 huggingface_hub==1.22.0 pyarrow numpy vastai || exit 1
-vastai start instance "$CONTAINER_ID" --api-key "$CONTAINER_API_KEY" >/dev/null   || echo "!! WARNING: self-destroy key not working; destroy this instance by hand"
+pip install -q tiktoken==0.12.0 huggingface_hub==1.22.0 pyarrow numpy || exit 1
 
 fetch_data() {
   hf download "$DATA_REPO" --repo-type dataset --local-dir data_cache/fineweb10B
