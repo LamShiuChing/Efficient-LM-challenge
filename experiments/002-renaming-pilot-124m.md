@@ -2,7 +2,7 @@
 
 > Frozen sections above the line. See [`docs/EXPERIMENT_PROTOCOL.md`](../docs/EXPERIMENT_PROTOCOL.md).
 
-- **Status:** running
+- **Status:** done (awaiting user decision on Phase 1c recipe)
 - **Phase / track:** Phase 1a / Track 1
 - **Date preregistered:** 2026-10-14
 - **Spec commit:** the commit that adds this file
@@ -139,4 +139,78 @@ Training reads the first 2.50B train tokens of each arm (4768 steps). Every arm 
 | r100 | 55909069 (PL) | 06:21 | 190k |
 | tag100 | 55909606 (VN) | 06:28 | 153k |
 
+All 4 arms reached step 4768 with no divergence. Checkpoints: `runs/e002_gpt2_124m_2p5B_<arm>/ckpt_004768.pt`. Evals: `evals/e002_<arm>_{dev,test,valnormal,valown}.json`. One eval host was stuck in `loading` for 6 min and was destroyed and re-rented. The tag100 eval host ran 3–5× slower but finished.
+
+### Arms vs normal (`test` split, the split the predictions are scored on)
+
+Δ = arm − mean of the 3 normal seeds. z = Δ / seed std. The seed std comes from **3 seeds that share one data order, and it does not include item-sampling noise**, so z overstates significance for accuracy metrics. For example, WinoGrande's seed std is 0.0018, while its binomial SE is about 0.014. Gold log-prob (`gold_lp`, nats/token of the gold answer) is less noisy. Per-arm numbers: `python scripts/summarize.py e002_<arm> --split test`. Normal: `e002_e001s1337 e002_e001s1338 e002_e001s1339`.
+
+| metric | normal | r50 | r80 | r100 | tag100 |
+|---|---|---|---|---|---|
+| val loss, normal FineWeb val | 3.562 | 3.650 | 3.736 | 3.787 | 3.782 |
+| val loss, own arm val | – | 3.609 | 3.607 | 3.603 | 3.139 |
+| hellaswag acc_norm | 0.2707 | 0.2686 | 0.2682 | 0.2688 | 0.2713 |
+| piqa acc_norm | 0.6090 | 0.6094 | 0.6115 | 0.6077 | 0.6066 |
+| winogrande acc | 0.5128 | 0.5351 | 0.5067 | 0.5233 | 0.5146 |
+| blimp acc | 0.7851 | 0.7799 | 0.7721 | **0.7613** | **0.7623** |
+| arc_easy acc | 0.3882 | 0.3855 | 0.3939 | 0.3792 | 0.3830 |
+| lambada acc | 0.2198 | 0.2078 | 0.1628 | 0.1570 | 0.1300 |
+| popqa_closed acc (majority 0.283) | 0.3148 | 0.2950 | 0.2729 | 0.2642 | 0.2680 |
+| popqa_closed gold_lp | -7.00 | -7.93 | -8.96 | -9.50 | -9.18 |
+| popqa_closed head gold_lp | -6.44 | -7.41 | -8.95 | -9.42 | -9.11 |
+| popqa_closed tail gold_lp | -7.67 | -8.48 | -9.09 | -9.88 | -9.47 |
+| popqa_oracle acc (majority 0.278) | 0.2980 | 0.2862 | 0.2723 | 0.2671 | 0.2639 |
+| popqa_oracle gold_lp | -3.60 | -4.06 | -4.80 | -5.35 | -5.49 |
+| context gain: oracle − closed gold_lp | +3.40 | +3.87 | +4.16 | +4.15 | +3.68 |
+| synth_1hop acc (chance 0.25) | 0.276 | 0.286 | 0.260 | 0.271 | 0.275 |
+| synth_1hop gold_lp | -1.69 | -1.36 | -1.45 | -1.42 | -2.09 |
+| synth_2hop acc (chance 0.25) | 0.244 | 0.261 | 0.252 | 0.258 | 0.277 |
+| synth_2hop gold_lp | -1.86 | -1.56 | -1.53 | -1.49 | -2.26 |
+
+On **dev** the picture is the same, with one exception: r50 BLiMP drops 0.0075 (z −4.1), and synth_1hop acc falls 0.03–0.04 for the surrogate arms. Neither replicates on test.
+
+### Prediction check (`test`)
+
+| # | prediction | result |
+|---|---|---|
+| 1 | closed-book gold_lp drops for r100, tag100 | **hit**: −2.51, −2.18 nats/token |
+| 1 | ordered r50 ≤ r80 ≤ r100 | **hit**: −0.93 / −1.96 / −2.51 |
+| 1 | in r50, tail drops more than head | **miss**: head −0.97 vs tail −0.81 |
+| 2 | r50: no drop on HellaSwag, PIQA, WinoGrande, BLiMP | **hit on test** (BLiMP z −1.4). On dev, BLiMP z −4.1 |
+| 2 | r100, tag100: each drop ≤ 0.01 | **miss on BLiMP** (−0.024, −0.023). HellaSwag, PIQA and WinoGrande hit |
+| 3 | popqa_oracle gold_lp: no drop, every arm | **miss**: drops −0.46 (r50) to −1.89 (tag100) |
+| 3 | synth_1hop acc: no drop | **hit on test** (all near chance). On dev, surrogate arms −0.03 to −0.04 |
+| 4 | r100 ≥ tag100 on each language metric | **mixed**, all within noise: r100 better on PIQA and WinoGrande, tag100 on HellaSwag and BLiMP |
+| 5 | normal-val loss higher for every renamed arm | **hit**: +0.09 to +0.22 |
+
 ## Conclusion
+
+**Renaming removes closed-book knowledge, and the effect grows with coverage. It also makes the model worse at reading real names supplied in context.** Under the decision rule:
+
+- Closed-book drops, so this is not a "stop".
+- On dev, no arm keeps every language metric inside the noise floor. r50 fails only on BLiMP (−0.0075), and that drop does not replicate on test. r100 and tag100 lose about 0.024 on BLiMP on both splits. → **report the trade-off and ask the user.**
+- **Flag: popqa_oracle gets worse in every renamed arm**, roughly in proportion to coverage. This is the row that bears on the headline hypothesis.
+- tag100 vs r100: no clear winner on language. On synthetic reasoning over fictional names, surrogates *help* (gold_lp +0.3 to +0.4) and tags *hurt* (−0.4).
+
+**Interpretation: the evidence points to a name-familiarity confound more than to a reasoning deficit.** This is not proven. Five observations support it:
+
+1. Oracle gold_lp falls with coverage even though the facts are given in context.
+2. The *context gain* (oracle − closed gold_lp) **rises** with renaming: +3.40 normal vs +3.87 to +4.16 for the surrogate arms. Renamed models benefit more from context but start from a lower base on real names.
+3. BLiMP, whose sentences are full of proper names, falls with coverage. The other language metrics do not.
+4. On synth, which uses invented names, surrogate-trained arms gain while tag-trained arms lose. Models handle names the way their training text presented them.
+5. The head bucket drops more than the tail, even at r50, which renames only entities with document frequency ≤ 128. The gold answers are real entity strings, so gold_lp also measures how readily the model writes real names.
+
+**Limits:**
+
+- 124M at 2.5B tokens is near the floor on context use. Normal models get oracle acc 0.298 vs majority 0.278, and synth is near chance. So accuracy-based claims about reasoning are weak here.
+- Each arm is a single run. The normal arm's training docs differ slightly from the arms'.
+- spaCy-small NER false positives are not measured.
+
+**User decision needed (Phase 1c recipe).** Options:
+
+- **A. Eval-only diagnostic (~$0.5, no training):** a renamed PopQA oracle that applies the same surrogate or tag renaming to the context, question and choices. It separates "can't use context" from "doesn't know real names". *Recommended first.*
+- **B. New recipe, real-name swap:** replace rare entities with other real names of the same type, consistent within a doc. Names stay in-distribution while the facts break. Needs a new data run (~$1.5) plus training (~$2.4 per arm).
+- **C. Adopt r50** as the knowledge-light recipe. It has the smallest language cost (within noise on test), but the closed-book drop is smaller and the oracle drop is −0.46.
+- **D. Move to filtering** (§1B) instead of renaming.
+
+**Spend:** about $13 for Phase 1a (credit $30.9 → $17.6), against the $15 cap. That covers the data stage, 4 training runs (one cap extended) and 5 eval instances.
