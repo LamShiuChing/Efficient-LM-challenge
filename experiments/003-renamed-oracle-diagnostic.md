@@ -82,7 +82,7 @@ Notation: Δ = arm − mean of the 3 normal seeds (e001 s1337/1338/1339), on gol
 
 ## Results
 
-Gold log-prob per token on **dev**. Δ = arm − mean of the 3 normal seeds; σ = the normal seed std. Test agrees to within ±0.03 on every Δ. Reproduce with `scratchpad e003.py` logic, or `scripts/summarize.py e003_<model> --split dev`.
+Gold log-prob per token on **dev**. Δ = arm − mean of the 3 normal seeds; σ = the normal seed std. Test agrees to within ±0.03 on every Δ. Reproduce with `python scripts/summarize.py e003_<model> --split dev` (normal: `e003_e001s1337` etc.; arms: `e003_r100` etc.).
 
 | task | normal (σ) | r50 Δ | r80 Δ | r100 Δ | tag100 Δ |
 |---|---|---|---|---|---|
