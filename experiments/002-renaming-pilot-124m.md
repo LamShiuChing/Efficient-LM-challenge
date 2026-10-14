@@ -75,11 +75,11 @@ All four arms are compared with the normal arm on the `test` split. Noise floor 
 
 ## Budget
 
-- **Data stage:** one 256-core instance, about 1 h at $0.68/h.
+- **Data stage:** one 256-core instance, about 2.5 h at $0.68/h (NER measured at ~700 docs/s on 245 workers), so about $1.7.
 - **Training:** 4 arms on 4 × RTX 5090, about 4 h at about $0.6/h, so about $2.4 per arm and about $9.6 in total.
 - **Evals:** one eval-only instance, about 0.5 h, about $0.3.
-- **Total:** about $11, against the $15 the user approved for Phase 1a overnight (2026-10-14).
-- **Hard caps:** `MAX_HOURS` 4.5 per training instance and 3 for the data stage, plus local watchdogs. If the projected spend exceeds $15, stop launching and report.
+- **Total:** about $11.6, against the $15 the user approved for Phase 1a overnight (2026-10-14).
+- **Hard caps:** `MAX_HOURS` 4.5 per training instance and 4 for the data stage, plus local watchdogs. If the projected spend exceeds $15, stop launching and report.
 
 ---
 
