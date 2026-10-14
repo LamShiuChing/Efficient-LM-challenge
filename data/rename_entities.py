@@ -12,6 +12,8 @@ Same documents in the same order as data/prepare_fineweb.py (same dataset revisi
   rename --arm A   r50 / r80 / r100: the rarest (surface, label) keys, by document frequency, up to one df threshold
                    that covers ~50 / 80 / 100% of mentions, get pseudo-word surrogates (consistent within a doc,
                    independent across docs). tag100: every mention becomes a typed tag (PERSON_1, ORG_2, ...).
+                   swap50: the r50 keys get *real* names instead: words of other rare entities of the same label
+                   (docs/PLAN_1B.md), mapped word by word within a doc so partial mentions stay consistent.
                    -> <arm>/fineweb_val_000000.bin (the renamed val docs, whole docs), fineweb_train_000001.bin, ...
                       (1e8-token llm.c shards, docs split across boundaries), <arm>/manifest.json.
 
@@ -56,7 +58,8 @@ NER_MODEL = "en_core_web_sm"
 NON_NER = ["tok2vec", "tagger", "parser", "attribute_ruler", "lemmatizer", "senter"]  # ner has its own tok2vec
 LABELS = ["PERSON", "NORP", "FAC", "ORG", "GPE", "LOC", "PRODUCT", "EVENT", "WORK_OF_ART", "LAW", "LANGUAGE"]
 LABEL_ID = {l: i for i, l in enumerate(LABELS)}
-ARMS = {"r50": 0.5, "r80": 0.8, "r100": 1.0, "tag100": 1.0}  # target fraction of mentions renamed
+ARMS = {"r50": 0.5, "r80": 0.8, "r100": 1.0, "tag100": 1.0, "swap50": 0.5}  # target fraction of mentions renamed
+NAME = re.compile(r"[A-Z][a-z]+(?: [A-Z][a-z]+){0,3}")  # swap pool: plain capitalized names of 1-4 words
 PIECE_CHARS = 20_000  # NER runs on pieces cut at newlines: bounds spaCy memory/max_length on huge docs
 TOP_WORDS = 100_000  # surrogate words never equal one of the most common lowercase words (ner: words_df.parquet)
 
@@ -144,7 +147,27 @@ def pseudo_word(rng, word, *avoid):
     return best[1]
 
 
-def rename_doc(text, spans, arm, doc_idx, keep=frozenset(), block=frozenset()):
+def swap_words(rng, words, label, pool, wmap, used):
+    """Real replacement words for the letter runs `words` of one surface: a word already mapped in this doc keeps
+    its replacement (so "Lovelace" alone matches "Ada Lovelace"); the rest come position by position from one pool
+    name of the same label and word count (else any of the label), never the original word or a replacement already
+    used for another word in this doc. Case follows the source word (IBM -> ACME, de -> de-like lowercase)."""
+    cands = pool.get((label, len(words))) or pool[label]
+    for k in range(50):
+        name = cands[rng.randrange(len(cands))]
+        new = [wmap.get(w) or name[min(i, len(name) - 1)] for i, w in enumerate(words)]
+        fresh = [n for w, n in zip(words, new) if w not in wmap]
+        if all(n.lower() != w.lower() for w, n in zip(words, new)) and not (set(fresh) & used) \
+                and len(set(fresh)) == len(fresh):
+            break
+    for w, n in zip(words, new):
+        if w not in wmap:
+            wmap[w] = n
+            used.add(n)
+    return [n.upper() if w.isupper() and len(w) > 1 else n.lower() if w.islower() else n for w, n in zip(words, new)]
+
+
+def rename_doc(text, spans, arm, doc_idx, keep=frozenset(), block=frozenset(), pool=None):
     """Replace entity spans [(start, end, label)] (sorted, disjoint) unless (surface, label) is in `keep`, then also
     every other whole-word, case-sensitive occurrence (outside any span) of a renamed surface that starts with an
     uppercase letter and has >= 2 letters (catches NER misses of repeats), with the same replacement.
@@ -154,8 +177,8 @@ def rename_doc(text, spans, arm, doc_idx, keep=frozenset(), block=frozenset()):
     Returns (new_text, reps, changed_tokens, residual, propagated): reps[i] = new text of span i or None if kept;
     changed_tokens = GPT-2 tokens of all replacement text; residual = occurrences of a replaced surface string left
     in new_text; propagated = extra occurrences replaced."""
-    rng, tags = random.Random(f"{arm}:{doc_idx}"), arm == "tag100"
-    seen, used, count, first = {}, set(), {}, {}  # first: surface -> its first replacement function
+    rng, tags, swap = random.Random(f"{arm}:{doc_idx}"), arm == "tag100", arm.startswith("swap")
+    seen, used, count, first, wmap = {}, set(), {}, {}, {}  # first: surface -> its first replacement function
     edits, reps, pos = [], [], 0
     for s, e, lab in spans:
         assert pos <= s < e <= len(text), "spans must be sorted and disjoint"
@@ -169,6 +192,9 @@ def rename_doc(text, spans, arm, doc_idx, keep=frozenset(), block=frozenset()):
                 count[lab] = count.get(lab, 0) + 1
                 seen[surface, lab] = f"{lab}_{count[lab]}"
             first.setdefault(surface, lambda t, tag=seen[surface, lab]: tag)
+        elif surface not in seen and swap:
+            seen[surface] = swap_words(rng, WORD.findall(surface), lab, pool, wmap, used)
+            first[surface] = lambda t, ws=seen[surface]: WORD.sub(lambda m, it=iter(ws): next(it), t)
         elif surface not in seen:
             seen[surface] = [pseudo_word(rng, w, block, used) for w in WORD.findall(surface)]
             used.update(w.lower() for w in seen[surface])
@@ -218,7 +244,7 @@ def pick_threshold(df, mentions, frac):
 
 
 # ---------------------------------------------------------------- workers (module-level state, one per process)
-_nlp = _arm = _keep = _block = None
+_nlp = _arm = _keep = _block = _pool = None
 
 
 def _init_ner():
@@ -246,16 +272,16 @@ def _ner_batch(texts):
     return [(sp, len(t)) for sp, t in zip(spans, tokenize(texts))], words
 
 
-def _init_rename(arm, keep, block):
-    global _arm, _keep, _block
-    _arm, _keep, _block = arm, keep, block
+def _init_rename(arm, keep, block, pool):
+    global _arm, _keep, _block, _pool
+    _arm, _keep, _block, _pool = arm, keep, block, pool
 
 
 def _rename_batch(items):
     out = []
     for d, text, spans in items:
         new, reps, changed, resid, nprop = rename_doc(text, [(s, e, LABELS[l]) for s, e, l in spans], _arm, d,
-                                                      _keep, _block)
+                                                      _keep, _block, _pool)
         out.append((d, tokenize([new])[0], len(reps), sum(r is not None for r in reps), changed, resid, nprop))
     return out
 
@@ -370,17 +396,34 @@ def rename_stage(args):
         return
     # ponytail: not resumable mid-arm (minutes on a big instance); a re-run starts the arm over
 
-    tags = args.arm == "tag100"
+    tags, swap = args.arm == "tag100", args.arm.startswith("swap")
     tab = pq.read_table(os.path.join(nd, ner["entity_df"]["file"]))
     thr, achieved = pick_threshold(tab["df"].to_numpy(), tab["mentions"].to_numpy(), ARMS[args.arm])
     kept = tab.filter(pc.greater(tab["df"], thr))
     keep = set(zip(kept["surface"].to_pylist(), kept["label"].to_pylist()))
-    block = set()
-    if not tags:  # surrogates are never a common word or a word of any entity seen by NER
+    block, pool = set(), None
+    if swap:  # real rare names (2 <= df <= threshold, so seen twice and never a kept famous name), per label
+        cand = tab.filter(pc.and_(pc.greater_equal(tab["df"], 2), pc.less_equal(tab["df"], thr)))
+        rng = random.Random(f"{args.arm}:pool")
+        by = {}
+        for surf, lab in zip(cand["surface"].to_pylist(), cand["label"].to_pylist()):
+            if NAME.fullmatch(surf):
+                by.setdefault(lab, []).append(tuple(surf.split()))
+        pool = {}
+        for lab, names in by.items():  # ponytail: capped per label so every worker's copy stays ~100 MB
+            names = rng.sample(names, min(len(names), args.swap_pool))
+            pool[lab] = names
+            for nm in names:
+                pool.setdefault((lab, len(nm)), []).append(nm)
+        for lab in LABELS:  # a label with no clean names borrows the whole pool
+            pool.setdefault(lab, [nm for lb in by for nm in pool[lb]])
+        print("swap pool: " + ", ".join(f"{lab} {len(pool[lab]):,}" for lab in LABELS), flush=True)
+    elif not tags:  # surrogates are never a common word or a word of any entity seen by NER
         ent = pc.unique(pc.list_flatten(pc.split_pattern_regex(pc.utf8_lower(tab["surface"]), r"[^\p{L}]+")))
         block = {w for w in ent.to_pylist() if len(w) > 1}
         block.update(pq.read_table(os.path.join(nd, ner["words_df"]["file"]))["word"].to_pylist())
     one_tok = {o + v + c for o in ONSETS for v in VOWELS for c in CODAS if ntok(" " + (o + v + c).capitalize()) == 1}
+    one_tok = set() if swap else one_tok
     free1 = len(one_tok - block)  # if ~0, 1-token names get 2-token surrogates (token_ratio goes up)
     print(f"{free1} of {len(one_tok)} one-token syllables free for surrogates", flush=True)
     print(f"{args.arm}: df threshold {thr} -> {achieved:.4f} of mentions renamed; {len(keep):,} keys kept; "
@@ -391,6 +434,9 @@ def rename_stage(args):
            "ner": {**ner["ner"], "manifest_sha256": hashlib.sha256(ner_bytes).hexdigest(),
                    "entity_df_sha256": ner["entity_df"]["sha256"]},
            "arm": {"name": args.arm, "kind": "typed tags LABEL_k, numbered per doc per label" if tags else
+                   "real-name swap: each letter run of a renamed surface -> a word of a real rare entity name of the same "
+                   "label (2 <= df <= threshold, plain capitalized 1-4 words, up to swap_pool per label), position by "
+                   "position, consistent per word within a doc, rng seeded by (arm, doc index)" if swap else
                    "pseudo-word surrogates per letter run, same surface -> same surrogate within a doc, "
                    "rng seeded by (arm, doc index), token count matched where possible; never a words_df word or "
                    "a word of any NER entity",
@@ -399,7 +445,8 @@ def rename_stage(args):
                            "and has >= 2 letters",
                    "target_mention_frac": ARMS[args.arm], "df_threshold": thr, "achieved_mention_frac": achieved,
                    "kept_keys": len(keep), "blocked_words": len(block),
-                   "free_one_token_syllables": None if tags else free1},
+                   "free_one_token_syllables": None if tags or swap else free1,
+                   "swap_pool": {lab: len(pool[lab]) for lab in LABELS} if swap else None},
            "tokenizer": "tiktoken gpt2 (encode_ordinary), <|endoftext|>=50256 prepended to each doc",
            "format": "256 x int32 header [20240520, 1, num_tokens] + uint16 tokens (llm.c)",
            "settings": {"shard_size": args.shard_size, "val_docs": val_docs, "docs": ner["stats"]["docs"]},
@@ -419,7 +466,7 @@ def rename_stage(args):
     st = dict.fromkeys(["mentions", "renamed", "changed_tokens", "residual", "propagated"], 0)
     parts, n, t0 = [], 0, time.time()
     docs = iter_texts(ner["revision"], [f["path"] for f in ner["source_files"]], 0, args.stream)
-    with mp.Pool(args.nprocs, initializer=_init_rename, initargs=(args.arm, keep, block)) as pool:
+    with mp.Pool(args.nprocs, initializer=_init_rename, initargs=(args.arm, keep, block, pool)) as workers:
         for c in ner["chunks"]:
             c0, c1 = c["doc_start"], c["doc_end"]
             texts = list(islice(docs, c1 - c0))
@@ -428,7 +475,7 @@ def rename_stage(args):
             cut = np.searchsorted(sp["doc"].to_numpy(), np.arange(c0, c1 + 1)).tolist()
             items = [(c0 + i, t, list(zip(s[a:b], e[a:b], l[a:b])))
                      for i, (t, a, b) in enumerate(zip(texts, cut[:-1], cut[1:]))]
-            for res in pool.map(_rename_batch, [items[i:i + 256] for i in range(0, len(items), 256)]):
+            for res in workers.map(_rename_batch, [items[i:i + 256] for i in range(0, len(items), 256)]):
                 for d, toks, *counts in res:
                     for k, v in zip(st, counts):
                         st[k] += v
@@ -510,6 +557,18 @@ def _selftest():
     c, x = r3[0], r3[2]
     assert n3 == f"{c} wrote. {c} left; Curies, curie and Curie Institute. {x} met X.", n3
     assert np3 == 1 and res3 == 2 and ch3 == ntok(c) + ntok(" " + c) + ntok(" " + x)  # residual: kept span + "X"
+    # real-name swap: originals gone, replacements from the pool, word-consistent partial mentions, case kept
+    pool = {"PERSON": [("Maria", "Delgado"), ("Tom", "Hartley"), ("Karen", "Okafor"), ("Lee",)],
+            ("PERSON", 2): [("Maria", "Delgado"), ("Tom", "Hartley"), ("Karen", "Okafor")], ("PERSON", 1): [("Lee",)],
+            "ORG": [("Acme",), ("Globex",)], ("ORG", 1): [("Acme",), ("Globex",)]}
+    t4, sp4 = doc(("Ada Lovelace", "PERSON"), " met ", ("Charles Babbage", "PERSON"), ". ", ("Lovelace", "PERSON"),
+                  " joined ", ("IBM", "ORG"), "; ", ("Babbage", "PERSON"), " left.")
+    n4, r4, *_ = rename_doc(t4, sp4, "swap50", 3, pool=pool)
+    assert not any(w in n4 for w in ("Ada", "Lovelace", "Charles", "Babbage", "IBM")), n4
+    (f1, l1), (f2, l2) = r4[0].split(), r4[1].split()
+    assert r4[2] == l1 and r4[4] == l2 and l1 != l2 and f1 != f2, r4  # surnames reused, people kept distinct
+    assert r4[3] in ("ACME", "GLOBEX") and {f1, l1, f2, l2} <= {w for nm in pool["PERSON"] for w in nm}, r4
+    assert rename_doc(t4, sp4, "swap50", 3, pool=pool)[0] == n4 and n4.endswith(" left.")
     assert rename_doc(t3, sp3, "tag100", 0, keep=kp)[0] ==         "PERSON_1 wrote. PERSON_1 left; Curies, curie and Curie Institute. ORG_1 met X."
 
     # span trimming (applied at NER time) and long-doc pieces
@@ -564,6 +623,7 @@ def main():
     ap.add_argument("--chunk_docs", type=int, default=100_000)
     ap.add_argument("--shard_size", type=int, default=10**8)
     ap.add_argument("--min_train_tokens", type=int, default=2_550_000_000, help="rename: fail if fewer")
+    ap.add_argument("--swap_pool", type=int, default=100_000, help="swap arms: max replacement names per label")
     args = ap.parse_args()
     args.nprocs = args.nprocs or default_nprocs()
     if args.stage:

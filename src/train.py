@@ -1,6 +1,8 @@
-"""Single-GPU GPT trainer.
+"""GPT trainer: one GPU, or several with DDP.
 
     python src/train.py configs/gpt2_124m_fineweb10B.json [--key=value ...] [--flag]
+    torchrun --standalone --nproc_per_node=4 src/train.py <config> [...]     # DDP; same tokens per step
+    ... --resume      # continue from runs/<run_name>/state.pt (written every state_every steps), else start fresh
 
 Config = DEFAULTS <- json file <- CLI overrides. Every key is flat; model shape keys are the
 GPTConfig fields. `--flag` alone sets a key to true; values are parsed as JSON, else string.
@@ -48,7 +50,10 @@ DEFAULTS = dict(
     # eval / io
     val_every=250,
     val_tokens=10_485_760,
-    ckpt_every=5000,
+    ckpt_every=5000,          # numbered model-only checkpoints ckpt_NNNNNN.pt
+    ckpt_dtype="fp32",        # numbered checkpoints before the last: fp32 | bf16 (half the storage; the final is fp32)
+    state_every=0,            # >0: every this many steps overwrite runs/<run>/state.pt (model + optimizer + data position)
+    resume=False,             # continue from state.pt if present (config must match apart from resume/device)
     log_every=1,
     compile=True,
     device="cuda",            # "cpu" for GPU-free tests
@@ -89,16 +94,22 @@ class SyntheticLoader:
     def reset(self):
         self.g = torch.Generator().manual_seed(self.seed)
 
+    def state(self):
+        return {"g": self.g.get_state()}
+
+    def load_state(self, st):
+        self.g.set_state(st["g"])
+
     def next_batch(self):
         buf = torch.randint(0, self.vocab, (self.B, self.T + 1), generator=self.g)
         return buf[:, :-1], buf[:, 1:]
 
 
-def make_loader(cfg, pattern, B, T, seed):
+def make_loader(cfg, pattern, B, T, seed, rank=0, world=1):
     if cfg["synthetic"]:
-        return SyntheticLoader(B, T, seed=seed)
+        return SyntheticLoader(B, T, seed=seed + 1000 * rank)
     from data.loader import ShardLoader  # lazy: owned by the data agent
-    return ShardLoader(str(ROOT / pattern), B, T)
+    return ShardLoader(str(ROOT / pattern), B, T, rank, world)
 
 
 def git_state():
@@ -134,6 +145,19 @@ def get_lr(step, cfg):
 
 def main(argv):
     cfg = parse_config(argv)
+    ddp = "RANK" in os.environ  # launched by torchrun
+    if ddp:
+        import torch.distributed as dist
+        from torch.nn.parallel import DistributedDataParallel
+        on_gpu = cfg["device"].startswith("cuda")
+        dist.init_process_group("nccl" if on_gpu else "gloo")  # gloo: CPU-only DDP self-check
+        rank, world, local = dist.get_rank(), dist.get_world_size(), int(os.environ["LOCAL_RANK"])
+        if on_gpu:
+            cfg["device"] = f"cuda:{local}"
+            torch.cuda.set_device(cfg["device"])
+    else:
+        rank, world, local = 0, 1, 0
+    master = rank == 0
     bench = cfg["benchmark_steps"] > 0
     commit, dirty = git_state()
     if dirty and not (cfg["exploratory"] or bench):
@@ -147,17 +171,17 @@ def main(argv):
     sync = torch.cuda.synchronize if cuda else (lambda: None)
 
     B, T = cfg["micro_batch_size"], cfg["block_size"]
-    assert cfg["total_batch_size"] % (B * T) == 0, "total_batch_size must be divisible by B*T"
-    grad_accum = cfg["total_batch_size"] // (B * T)
+    assert cfg["total_batch_size"] % (B * T * world) == 0, "total_batch_size must be divisible by B*T*world"
+    grad_accum = cfg["total_batch_size"] // (B * T * world)
     max_steps = cfg["benchmark_steps"] if bench else cfg["max_steps"]
 
     mcfg = GPTConfig(**{f.name: cfg[f.name] for f in dataclasses.fields(GPTConfig)})
     raw_model = GPT(mcfg).to(device)
-    model = torch.compile(raw_model) if cfg["compile"] else raw_model
     n_total, n_nonemb = raw_model.num_params(False), raw_model.num_params(True)
     # MFU flops/token: 6*(matmul params incl. lm_head, excl. wpe) + attention (PaLM appendix B)
     L, H, Q = mcfg.n_layer, mcfg.n_head, mcfg.n_embd // mcfg.n_head
-    flops_per_token = 6 * (n_total - raw_model.transformer.wpe.weight.numel()) + 12 * L * H * Q * T
+    n_wpe = raw_model.transformer.wpe.weight.numel() if "wpe" in raw_model.transformer else 0
+    flops_per_token = 6 * (n_total - n_wpe) + 12 * L * H * Q * T
     planned_tokens = max_steps * cfg["total_batch_size"]
 
     def mfu(tok_s):
@@ -169,61 +193,98 @@ def main(argv):
         [{"params": decay, "weight_decay": cfg["weight_decay"]}, {"params": no_decay, "weight_decay": 0.0}],
         lr=cfg["lr"], betas=(cfg["beta1"], cfg["beta2"]), eps=cfg["eps"], fused=True)
 
-    train_loader = make_loader(cfg, cfg["train_pattern"], B, T, seed=cfg["seed"])
-    val_loader = None if bench else make_loader(cfg, cfg["val_pattern"], B, T, seed=cfg["seed"] + 1)
-    val_steps = max(1, cfg["val_tokens"] // (B * T))
+    train_loader = make_loader(cfg, cfg["train_pattern"], B, T, cfg["seed"], rank, world)
+    val_loader = None if bench else make_loader(cfg, cfg["val_pattern"], B, T, cfg["seed"] + 1, rank, world)
+    val_steps = max(1, cfg["val_tokens"] // (B * T * world))
 
     run_dir = ROOT / "runs" / cfg["run_name"]
-    if not bench:
+    state_path = run_dir / "state.pt"
+    start_step, tokens_seen = 0, 0
+    resumed = cfg["resume"] and not bench and state_path.exists()
+    if resumed:  # before compile/DDP wrap; every rank loads the same state
+        st = torch.load(state_path, map_location=device, weights_only=True)
+        same = lambda c: {k: v for k, v in c.items() if k not in ("resume", "device")}  # noqa: E731
+        assert same(st["train_config"]) == same(cfg), "resume: config differs from the saved run"
+        raw_model.load_state_dict(st["model"])
+        opt.load_state_dict(st["opt"])
+        train_loader.load_state(st["loader"])
+        start_step, tokens_seen = st["step"], st["tokens_seen"]
+        del st
+    model = torch.compile(raw_model) if cfg["compile"] else raw_model
+    if ddp:
+        model = DistributedDataParallel(model, device_ids=[local] if device.startswith("cuda") else None)
+
+    if not bench and master and not resumed:
         if (run_dir / "log.jsonl").exists() and not cfg["exploratory"]:
-            sys.exit(f"{run_dir} already has a log; pick a new run_name")
+            sys.exit(f"{run_dir} already has a log; pick a new run_name (or --resume)")
         run_dir.mkdir(parents=True, exist_ok=True)
         info = dict(
             config=cfg, git_commit=commit, git_dirty=dirty, argv=sys.argv,
             python=sys.version, torch=torch.__version__, cuda=torch.version.cuda,
-            gpu=torch.cuda.get_device_name() if cuda else "cpu", n_gpus=int(cuda), platform=platform.platform(),
+            gpu=torch.cuda.get_device_name() if cuda else "cpu", n_gpus=world if cuda else 0,
+            world_size=world, platform=platform.platform(),
             params_total=n_total, params_non_embedding=n_nonemb, grad_accum=grad_accum,
             planned_tokens=planned_tokens, planned_flops_6ND=6 * n_nonemb * planned_tokens,
             flops_per_token_mfu=flops_per_token, data_manifest=data_manifest(cfg),
             start_time=time.strftime("%Y-%m-%dT%H:%M:%S"),
         )
         (run_dir / "run_info.json").write_text(json.dumps(info, indent=2))
-        log = open(run_dir / "log.jsonl", "w")
-    print(f"params total {n_total/1e6:.2f}M, non-embedding {n_nonemb/1e6:.2f}M | grad_accum {grad_accum} | "
+    log = open(run_dir / "log.jsonl", "a") if not bench and master else None
+    if master:
+        print(f"params total {n_total/1e6:.2f}M, non-embedding {n_nonemb/1e6:.2f}M | grad_accum {grad_accum} | "
           f"planned {planned_tokens/1e9:.3f}B tokens")
 
     def write(rec):
+        if not master:
+            return
         print(json.dumps(rec))
-        if not bench:
+        if log:
             log.write(json.dumps(rec) + "\n")
             log.flush()
 
+    if resumed:
+        write({"resumed_at_step": start_step, "tokens_seen": tokens_seen, "world_size": world,
+               "time": time.strftime("%Y-%m-%dT%H:%M:%S")})
+
     def save(step, tokens_seen):
         path = run_dir / f"ckpt_{step:06d}.pt"
-        torch.save({"model": raw_model.state_dict(), "config": dataclasses.asdict(mcfg), "step": step,
+        sd = raw_model.state_dict()
+        if cfg["ckpt_dtype"] == "bf16" and step < cfg["max_steps"]:
+            sd = {k: v.to(torch.bfloat16) for k, v in sd.items()}
+        torch.save({"model": sd, "config": dataclasses.asdict(mcfg), "step": step,
                     "tokens_seen": tokens_seen, "train_config": cfg}, path)
         return path
+
+    def save_state(step, tokens_seen):  # atomic: a crash mid-write never leaves a broken state.pt
+        tmp = state_path.with_suffix(".tmp")
+        torch.save({"model": raw_model.state_dict(), "config": dataclasses.asdict(mcfg), "opt": opt.state_dict(),
+                    "step": step, "tokens_seen": tokens_seen, "loader": train_loader.state(), "train_config": cfg}, tmp)
+        os.replace(tmp, state_path)
 
     @torch.no_grad()
     def evaluate():
         model.eval()
         val_loader.reset()
-        total = 0.0
+        total = torch.zeros((), device=device)
         for _ in range(val_steps):
             x, y = val_loader.next_batch()
             with torch.autocast(device.split(":")[0], dtype=torch.bfloat16):
-                total += model(x.to(device), y.to(device))[1].item()
+                total += model(x.to(device), y.to(device))[1].float()
+        if ddp:
+            dist.all_reduce(total)
         model.train()
-        return total / val_steps
+        return total.item() / (val_steps * world)
 
     t_start = time.time()
-    tokens_seen, timings = 0, []
-    for step in range(max_steps):
+    timings = []
+    for step in range(start_step, max_steps):
         last = step == max_steps - 1
-        if val_loader and (step % cfg["val_every"] == 0 or last):
+        if val_loader and (step % cfg["val_every"] == 0 or last) and not (resumed and step == start_step):
             write({"step": step, "tokens_seen": tokens_seen, "val_loss": evaluate()})
-        if not bench and step > 0 and step % cfg["ckpt_every"] == 0:
+        if not bench and master and step > 0 and step % cfg["ckpt_every"] == 0:
             save(step, tokens_seen)
+        if not bench and master and cfg["state_every"] and step > start_step and step % cfg["state_every"] == 0:
+            save_state(step, tokens_seen)
 
         sync()
         t0 = time.time()
@@ -231,7 +292,9 @@ def main(argv):
         for g in opt.param_groups:
             g["lr"] = lr
         loss_acc = torch.zeros((), device=device)
-        for _ in range(grad_accum):
+        for micro in range(grad_accum):
+            if ddp:  # all-reduce gradients only on the last micro-step
+                model.require_backward_grad_sync = micro == grad_accum - 1
             x, y = train_loader.next_batch()
             if cuda:
                 x, y = x.pin_memory(), y.pin_memory()
@@ -241,6 +304,8 @@ def main(argv):
             loss = loss / grad_accum
             loss_acc += loss.detach()
             loss.backward()
+        if ddp:
+            dist.all_reduce(loss_acc, op=dist.ReduceOp.AVG)
         norm = torch.nn.utils.clip_grad_norm_(raw_model.parameters(), cfg["grad_clip"])
         opt.step()
         opt.zero_grad(set_to_none=True)
@@ -257,13 +322,20 @@ def main(argv):
     if bench:
         steady = timings[min(3, len(timings) - 1):]  # drop compile/warmup steps
         tok_s = cfg["total_batch_size"] * len(steady) / sum(steady)
-        print("BENCHMARK " + json.dumps({
-            "compile": cfg["compile"], "micro_batch_size": B, "seq_len": T, "grad_accum": grad_accum,
-            "tok_per_s": round(tok_s), "mfu": mfu(tok_s),
-            "peak_mem_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2),
-            "hours_per_10B": round(10e9 / tok_s / 3600, 1)}))
-        return
+        if master:
+            print("BENCHMARK " + json.dumps({
+                "compile": cfg["compile"], "micro_batch_size": B, "seq_len": T, "grad_accum": grad_accum,
+                "world_size": world, "tok_per_s": round(tok_s), "mfu": mfu(tok_s),
+                "peak_mem_gb": round(torch.cuda.max_memory_allocated() / 1e9, 2) if cuda else None,
+                "hours_per_10B": round(10e9 / tok_s / 3600, 1)}))
+    elif master:
+        finish(raw_model, val_loader, device, max_steps, tokens_seen, t_start, save, write)
+    if ddp:
+        dist.barrier()
+        dist.destroy_process_group()
 
+
+def finish(raw_model, val_loader, device, max_steps, tokens_seen, t_start, save, write):
     path = save(max_steps, tokens_seen)
     # round-trip check: the checkpoint reproduces the trained model's logits
     x, _ = val_loader.next_batch()

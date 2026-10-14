@@ -30,27 +30,35 @@ def read_shard(path):
 
 class ShardLoader:
     """Yields (x, y) LongTensors of shape (B, T), y = x shifted by one, walking shards in order and cycling.
-    Batches never span shards (tail of each shard shorter than B*T+1 is skipped), as in llm.c."""
+    Batches never span shards (tail of each shard shorter than one step is skipped), as in llm.c.
+    DDP: `world` processes read one stream together; per step, rank r takes the r-th B*T chunk, so all ranks
+    together read exactly what one process with batch B*world would. world=1 is the single-process loader."""
 
-    def __init__(self, pattern, B, T):
+    def __init__(self, pattern, B, T, rank=0, world=1):
         self.files = sorted(glob.glob(pattern))
         assert self.files, f"no shards match {pattern}"
-        self.B, self.T = B, T
+        self.B, self.T, self.rank, self.world = B, T, rank, world
         self.reset()
 
     def reset(self):
-        self.shard = 0
-        self.tokens = read_shard(self.files[0])
-        self.pos = 0
+        self.load_state({"shard": 0, "pos": 0})
+
+    def state(self):  # where the next step starts (same on every rank)
+        return {"shard": self.shard, "pos": self.pos}
+
+    def load_state(self, st):
+        self.shard, self.pos = st["shard"], st["pos"]
+        self.tokens = read_shard(self.files[self.shard])
 
     def next_batch(self):
-        n = self.B * self.T + 1
+        n = self.B * self.T * self.world + 1  # one step for all ranks; every rank checks the same bound
         while self.pos + n > len(self.tokens):
             self.shard = (self.shard + 1) % len(self.files)
             self.tokens = read_shard(self.files[self.shard])
             self.pos = 0
             assert len(self.tokens) >= n, f"{self.files[self.shard]} smaller than one batch"
-        buf = torch.from_numpy(self.tokens[self.pos:self.pos + n].astype(np.int64))
+        s = self.pos + self.rank * self.B * self.T
+        buf = torch.from_numpy(self.tokens[s:s + self.B * self.T + 1].astype(np.int64))
         self.pos += n - 1
         return buf[:-1].view(self.B, self.T), buf[1:].view(self.B, self.T)
 
@@ -80,7 +88,20 @@ def _selftest():
         assert x[0, 0] == 0
         L.reset()
         assert L.next_batch()[0][0, 0] == 0
-        del L  # Windows can't delete a file that is still memmapped
+        # DDP: 2 ranks with B=1 read exactly the single-process B=2 stream, step by step, across shards
+        R = [ShardLoader(os.path.join(d, "t_*.bin"), B=1, T=8, rank=r, world=2) for r in range(2)]
+        L.reset()
+        for _ in range(6):
+            x, y = L.next_batch()
+            xs = [l.next_batch() for l in R]
+            assert torch.equal(torch.cat([a for a, _ in xs]), x) and torch.equal(torch.cat([b for _, b in xs]), y)
+        # resume: a loader restored from state() continues identically
+        st = L.state()
+        want = L.next_batch()[0]
+        L2 = ShardLoader(os.path.join(d, "t_*.bin"), B=2, T=8)
+        L2.load_state(st)
+        assert torch.equal(L2.next_batch()[0], want)
+        del L, L2, R  # Windows can't delete a file that is still memmapped
     print("loader selftest OK")
 
 
