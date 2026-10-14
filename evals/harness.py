@@ -5,7 +5,10 @@ evaluate(logits_fn, encode, tasks, limit=None, split='dev') -> results dict.
   moves it to its own device. Rows are right-padded with 0; causal models ignore the padding.
   encode(str) -> list[int], tiktoken gpt2.
 """
+import json
 import os
+import random
+from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +17,7 @@ os.environ.setdefault("HF_HOME", str(ROOT / "data_cache" / "hf"))  # C: is nearl
 import numpy as np
 import torch
 
-SUITE_VERSION = "evals-v0-dev"
+SUITE_VERSION = "evals-v0.2-dev"
 EOT = 50256  # gpt2 <|endoftext|>, used as the context when a task has none (BLiMP)
 SEED = 0     # dev carve-outs and bootstrap
 
@@ -27,6 +30,7 @@ REV = {
     "EleutherAI/lambada_openai": "900124bf3b8235c6daf21033af9948b3f07346c4",
     "cimec/lambada": "5953bd97664b64b95754f299b2309ecfbfbe81b9",
     "nyu-mll/blimp": "877fba0801ffb7cbd8c39c1ff314a46f053f6036",
+    "akariasai/PopQA": "098765c79ea10a2cb19c828324e33281b8336ec0",  # verified 2026-10-14
 }
 
 
@@ -107,9 +111,138 @@ def blimp(split):
     return items
 
 
+# --- Phase 1a knowledge tasks -------------------------------------------------------------
+# PopQA (Mallen et al. 2023): one HF split "test", 14267 rows, 16 relations (prop).
+POPQA_POP_BOUNDS = (375, 2879)  # s_pop terciles (np.quantile 1/3, 2/3) over all 14267 rows
+POPQA_BUCKETS = ("tail", "torso", "head")  # s_pop <= 375 | <= 2879 | > 2879
+POPQA_TEMPLATES = {  # oracle-context fact, one per relation
+    "occupation": "{subj}'s occupation is {obj}.",
+    "place of birth": "{subj} was born in {obj}.",
+    "genre": "The genre of {subj} is {obj}.",
+    "father": "The father of {subj} is {obj}.",
+    "mother": "The mother of {subj} is {obj}.",
+    "country": "{subj} is located in {obj}.",
+    "producer": "{subj} was produced by {obj}.",
+    "director": "{subj} was directed by {obj}.",
+    "screenwriter": "The screenwriter of {subj} was {obj}.",
+    "composer": "The composer of {subj} was {obj}.",
+    "author": "The author of {subj} is {obj}.",
+    "capital": "The capital of {subj} is {obj}.",
+    "capital of": "{subj} is the capital of {obj}.",
+    "color": "The color of {subj} is {obj}.",
+    "religion": "The religion of {subj} is {obj}.",
+    "sport": "{subj} plays {obj}.",
+}
+
+
+def popqa_build(rows):
+    """PopQA rows (dicts with id, subj, prop, question, possible_answers (JSON str), s_pop) -> records.
+
+    Dedupes repeated questions (same subj+prop; first row wins, aliases are unioned). Gold = first
+    possible answer. 3 distractors = golds of other questions with the same prop, sampled by row so
+    frequent objects are drawn as often as they are gold; never an alias of the gold (case-insensitive),
+    never repeated. The row a distractor was drawn from supplies a true fact for it, so the oracle
+    context states all 4 choices, each bound to its own subject. Seeded per row id, so records do not
+    depend on split or limit. prior[j] = how often answers[j] is gold in this relation (majority baseline).
+    """
+    recs, bad = {}, {}
+    for d in rows:
+        if not d["subj"]:  # 3 rows have no subject
+            continue
+        pa = json.loads(d["possible_answers"])
+        bad.setdefault(d["question"], set()).update(a.lower() for a in pa)
+        recs.setdefault(d["question"], {**d, "gold": pa[0]})
+    pool = {}
+    for r in recs.values():
+        pool.setdefault(r["prop"], []).append(r)
+    freq = {p: Counter(x["gold"] for x in v) for p, v in pool.items()}
+    out = []
+    for q, r in recs.items():
+        rng = np.random.default_rng([SEED, int(r["id"])])
+        cands, seen, dis = pool[r["prop"]], set(bad[q]), []
+        for i in rng.permutation(len(cands)):
+            c = cands[i]
+            # its fact's subject must not be our subject or a gold alias (gold would appear twice in context)
+            if c["gold"].lower() not in seen and c["subj"] != r["subj"] and c["subj"].lower() not in bad[q]:
+                seen.add(c["gold"].lower())
+                dis.append(c)
+                if len(dis) == 3:
+                    break
+        if len(dis) < 3:  # relation too small to find 3 wrong objects
+            continue
+        lab = int(rng.integers(4))
+        dis.insert(lab, r)
+        facts = [(dis[j]["subj"], dis[j]["gold"]) for j in rng.permutation(4)]
+        b = 0 if r["s_pop"] <= POPQA_POP_BOUNDS[0] else 1 if r["s_pop"] <= POPQA_POP_BOUNDS[1] else 2
+        out.append({"question": q, "subj": r["subj"], "prop": r["prop"], "answers": [x["gold"] for x in dis],
+                    "label": lab, "bucket": POPQA_BUCKETS[b], "facts": facts,
+                    "prior": [freq[r["prop"]][x["gold"]] for x in dis]})
+    return out
+
+
+def popqa(split, oracle):
+    # No official dev split: seeded 50/50 partition of the deduped questions. Items stay in permuted
+    # order, so --limit takes a random sample instead of the first relation in the file.
+    recs = popqa_build(_load("akariasai/PopQA", "test"))
+    perm = np.random.default_rng(SEED).permutation(len(recs))
+    half = perm[:len(recs) // 2] if split == "dev" else perm[len(recs) // 2:]
+    items = []
+    for r in (recs[i] for i in half):
+        ctx = (" ".join(POPQA_TEMPLATES[r["prop"]].format(subj=s, obj=o) for s, o in r["facts"]) + "\n") if oracle else ""
+        items.append({"choices": [(ctx + f"Q: {r['question']}\nA:", " " + a) for a in r["answers"]],
+                      "label": r["label"], "bucket": r["bucket"], "prior": r["prior"]})
+    return items
+
+
+# Synthetic in-context reasoning over fictional entities. Independent of any training-data renaming.
+_ON = "b d f g k l m n p r s t v z br dr gr kr st tr th sh".split()
+_VO = "a e i o u ai ea ou".split()
+_CO = ["", "", "n", "r", "l", "s", "k", "m"]
+SYNTH_RELS = ["works in", "lives in", "was born in"]  # person -> city relation, one per item
+# Cloze prompts: 1-hop "{P} {rel}" -> city, 2-hop "{P} {rel} a city in the country of" -> country.
+SYNTH_N = 1000  # items per split
+
+
+def _pseudo(rng, used, country=False):
+    """Pronounceable 2-syllable name; no name in one item is a substring of another."""
+    while True:
+        n = "".join(rng.choice(_ON) + rng.choice(_VO) + rng.choice(_CO) for _ in range(2)).capitalize()
+        if country:
+            n += "nia" if n[-1] in "aeiou" else "ia"
+        if not any(n in u or u in n for u in used):
+            used.append(n)
+            return n
+
+
+def synth(split, hops):
+    """4 chains person -> city -> country as 8 shuffled facts, then a cloze about one person.
+
+    1-hop completes the city (choices: the 4 cities), 2-hop the country (choices: the 4 countries).
+    Every candidate appears equally often in the context, so frequency gives no hint. Item i of a
+    split has the same context and person for both hop counts (rng use does not depend on hops).
+    """
+    items = []
+    for i in range(SYNTH_N):
+        rng = random.Random(f"synth-{split}-{i}")
+        used = []
+        P = [_pseudo(rng, used) for _ in range(4)]
+        C = [_pseudo(rng, used) for _ in range(4)]
+        K = [_pseudo(rng, used, country=True) for _ in range(4)]
+        rel = rng.choice(SYNTH_RELS)
+        facts = [f"{p} {rel} {c}." for p, c in zip(P, C)] + [f"{c} is a city in {k}." for c, k in zip(C, K)]
+        rng.shuffle(facts)
+        q = rng.randrange(4)
+        ctx = " ".join(facts) + f" {P[q]} {rel}" + ("" if hops == 1 else " a city in the country of")
+        items.append({"choices": [(ctx, " " + e) for e in (C if hops == 1 else K)], "label": q})
+    return items
+
+
 TASKS = {"hellaswag": hellaswag, "piqa": piqa, "winogrande": winogrande, "arc_easy": arc_easy,
-         "lambada": lambada, "blimp": blimp}
-NORM_TASKS = {"hellaswag", "piqa", "arc_easy"}  # tasks whose choices differ in length
+         "lambada": lambada, "blimp": blimp,
+         "popqa_closed": lambda s: popqa(s, oracle=False), "popqa_oracle": lambda s: popqa(s, oracle=True),
+         "synth_1hop": lambda s: synth(s, 1), "synth_2hop": lambda s: synth(s, 2)}
+# tasks whose choices differ in length
+NORM_TASKS = {"hellaswag", "piqa", "arc_easy", "popqa_closed", "popqa_oracle", "synth_1hop", "synth_2hop"}
 
 
 @torch.no_grad()
@@ -149,7 +282,7 @@ def _ci(v, n_boot=1000):
 
 
 def _metrics(task, items, scores):
-    res, k = {"n": len(items)}, 0
+    k = 0
     acc, acc_norm, gold_lp, ll = [], [], [], []
     for it in items:
         s = scores[k:k + len(it["choices"])]
@@ -162,14 +295,27 @@ def _metrics(task, items, scores):
         acc.append(int(np.argmax([x[0] for x in s])) == lab)
         acc_norm.append(int(np.argmax([x[0] / x[1] for x in s])) == lab)
         gold_lp.append(s[lab][0] / s[lab][1])
-    res["acc"], res["acc_ci95"] = _ci(acc)
-    if task in NORM_TASKS:
-        res["acc_norm"], res["acc_norm_ci95"] = _ci(acc_norm)
-    if task == "lambada":  # lm-eval: ppl = exp(-mean over items of target-word logprob)
-        m, (lo, hi) = _ci(ll)
-        res["ppl"], res["ppl_ci95"] = float(np.exp(-m)), [float(np.exp(-hi)), float(np.exp(-lo))]
-    else:  # continuous metric: mean per-token logprob of the gold continuation
-        res["gold_logprob_per_tok"], res["gold_logprob_per_tok_ci95"] = _ci(gold_lp)
+
+    def summ(sel):
+        pick = lambda v: [v[i] for i in sel]  # noqa: E731
+        res = {"n": len(sel)}
+        res["acc"], res["acc_ci95"] = _ci(pick(acc))
+        if task in NORM_TASKS:
+            res["acc_norm"], res["acc_norm_ci95"] = _ci(pick(acc_norm))
+        if task == "lambada":  # lm-eval: ppl = exp(-mean over items of target-word logprob)
+            m, (lo, hi) = _ci(pick(ll))
+            res["ppl"], res["ppl_ci95"] = float(np.exp(-m)), [float(np.exp(-hi)), float(np.exp(-lo))]
+        else:  # continuous metric: mean per-token logprob of the gold continuation
+            res["gold_logprob_per_tok"], res["gold_logprob_per_tok_ci95"] = _ci(pick(gold_lp))
+        if "prior" in items[0]:  # popqa: always pick the choice most often gold for its relation
+            res["majority_baseline"] = float(np.mean([int(np.argmax(items[i]["prior"])) == items[i]["label"]
+                                                      for i in sel]))
+        return res
+
+    res = summ(range(len(items)))
+    if items and "bucket" in items[0]:  # popqa: the same metrics per subject-popularity bucket
+        sel = {b: [i for i, it in enumerate(items) if it["bucket"] == b] for b in POPQA_BUCKETS}
+        res["buckets"] = {b: summ(v) for b, v in sel.items() if v}
     return res
 
 
